@@ -1,0 +1,24 @@
+name: ai_face_attendance_frontend
+description: A new Flutter project for the AI Face Attendance System.
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP client for API calls
+  http: ^1.2.1
+
+  # Camera access for face capture
+  camera: ^0.10.5+9
+
+  # Path helpers for saving images
+  path_provider: ^2.1.2
+  path: ^1.8.3
+
+  # State management (recommended)
+  provider: ^6.1.2
