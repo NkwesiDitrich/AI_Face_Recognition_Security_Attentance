@@ -1,3 +1,4 @@
+// frontend/android/settings.gradle.kts
 pluginManagement {
     repositories {
         google()
@@ -7,15 +8,12 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
     }
 }
 
-plugins {
-    id("dev.flutter.flutter-gradle-plugin") version "1.0.0" apply false
-}
-
+rootProject.name = "ai_face_attendance_frontend"
 include(":app")
