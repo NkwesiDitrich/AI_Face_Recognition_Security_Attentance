@@ -9,10 +9,6 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // Required for resolving Flutter artifacts and plugins
-        maven {
-            url = uri("https://storage.googleapis.com/download.flutter.io")
-        }
     }
 }
 
@@ -26,3 +22,4 @@ subprojects {
 tasks.register<Delete>("clean") {
     delete(rootProject.buildDir)
 }
+
