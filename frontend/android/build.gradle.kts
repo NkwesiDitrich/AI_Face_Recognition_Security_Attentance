@@ -1,36 +1,28 @@
-buildscript {
-    ext.kotlin_version = '1.8.20'  // <-- MUST be at least 1.8.20
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:7.4.2'  // <-- MUST be at least 7.4.2
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
-    }
+// ...existing code...
+plugins {
+    id("com.android.application") version "7.4.2" apply false
+    id("com.android.library") version "7.4.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.8.20" apply false
 }
 
 allprojects {
     repositories {
         google()
         mavenCentral()
+        // Required for resolving Flutter artifacts and plugins
+        maven {
+            url = uri("https://storage.googleapis.com/download.flutter.io")
+        }
     }
 }
 
-val newBuildDir: Directory =
-    rootProject.layout.buildDirectory
-        .dir("../../build")
-        .get()
-rootProject.layout.buildDirectory.value(newBuildDir)
+rootProject.buildDir = rootProject.file("../../build")
 
 subprojects {
-    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
-    project.layout.buildDirectory.value(newSubprojectBuildDir)
-}
-subprojects {
-    project.evaluationDependsOn(":app")
+    project.buildDir = rootProject.file("../../build/${project.name}")
+    evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
-    delete(rootProject.layout.buildDirectory)
+    delete(rootProject.buildDir)
 }
