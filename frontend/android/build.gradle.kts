@@ -1,10 +1,3 @@
-// ...existing code...
-plugins {
-    id("com.android.application") version "7.4.2" apply false
-    id("com.android.library") version "7.4.2" apply false
-    id("org.jetbrains.kotlin.android") version "1.8.20" apply false
-}
-
 allprojects {
     repositories {
         google()
@@ -12,14 +5,20 @@ allprojects {
     }
 }
 
-rootProject.buildDir = rootProject.file("../../build")
+val newBuildDir: Directory =
+    rootProject.layout.buildDirectory
+        .dir("../../build")
+        .get()
+rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {
-    project.buildDir = rootProject.file("../../build/${project.name}")
-    evaluationDependsOn(":app")
+    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
+    project.layout.buildDirectory.value(newSubprojectBuildDir)
+}
+subprojects {
+    project.evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
-    delete(rootProject.buildDir)
+    delete(rootProject.layout.buildDirectory)
 }
-

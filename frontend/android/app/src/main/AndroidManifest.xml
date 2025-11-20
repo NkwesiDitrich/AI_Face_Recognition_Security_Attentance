@@ -1,11 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- REQUIRED PERMISSIONS -->
+    <!-- INTERNET PERMISSION (FastAPI calls) -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- CAMERA PERMISSIONS -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-feature android:name="android.hardware.camera" />
-    <uses-feature android:name="android.hardware.camera.autofocus" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
         android:label="ai_face_attendance_frontend"
@@ -17,10 +18,11 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
 
+            <!-- Flutter's splash/launch theme -->
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
@@ -32,9 +34,18 @@
 
         </activity>
 
+        <!-- This ensures Flutter uses the V2 embedding -->
         <meta-data
-            android:name="io.flutter.embedding.android.SplashScreenDrawable"
-            android:resource="@drawable/launch_background" />
-
+            android:name="flutterEmbedding"
+            android:value="2" />
     </application>
+
+    <!-- Required by Flutter text processing plugin -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+
 </manifest>
