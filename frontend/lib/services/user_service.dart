@@ -5,6 +5,9 @@ import 'package:http/http.dart' as http;
 class UserService {
   static const String baseUrl = 'http://10.0.2.2:8000/api/v1';
 
+  /// ------------------------------
+  /// ENROLL USER
+  /// ------------------------------
   Future<Map<String, dynamic>> enrollUser({
     required String name,
     required String employeeId,
@@ -27,21 +30,28 @@ class UserService {
         await http.MultipartFile.fromPath('file', imageFile.path),
       );
 
-      var response = await request.send();
-      var responseBytes = await response.stream.toBytes();
-      var responseString = utf8.decode(responseBytes);
+      // --------- ADD TIMEOUT HERE -----------
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 90),
+        onTimeout: () {
+          throw Exception("Request timed out while enrolling user.");
+        },
+      );
+
+      var response = await http.Response.fromStream(streamedResponse);
+      var responseBody = response.body;
 
       if (response.statusCode == 201) {
         return {
           'success': true,
           'message': 'User enrolled successfully',
-          'data': jsonDecode(responseString),
+          'data': jsonDecode(responseBody),
         };
       } else {
         return {
           'success': false,
           'message': 'Enrollment failed: ${response.statusCode}',
-          'data': responseString,
+          'data': responseBody,
         };
       }
     } catch (e) {
@@ -53,6 +63,9 @@ class UserService {
     }
   }
 
+  /// ------------------------------
+  /// SEARCH USER
+  /// ------------------------------
   Future<Map<String, dynamic>> searchUser({
     required File imageFile,
   }) async {
@@ -68,15 +81,22 @@ class UserService {
         await http.MultipartFile.fromPath('file', imageFile.path),
       );
 
-      var response = await request.send();
-      var responseBytes = await response.stream.toBytes();
-      var responseString = utf8.decode(responseBytes);
+      // --------- ADD TIMEOUT HERE TOO -----------
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 90),
+        onTimeout: () {
+          throw Exception("Request timed out while searching user.");
+        },
+      );
+
+      var response = await http.Response.fromStream(streamedResponse);
+      var responseBody = response.body;
 
       if (response.statusCode == 200) {
         return {
           'success': true,
           'message': 'User found',
-          'data': jsonDecode(responseString),
+          'data': jsonDecode(responseBody),
         };
       } else if (response.statusCode == 404) {
         return {
@@ -88,7 +108,7 @@ class UserService {
         return {
           'success': false,
           'message': 'Search failed: ${response.statusCode}',
-          'data': responseString,
+          'data': responseBody,
         };
       }
     } catch (e) {

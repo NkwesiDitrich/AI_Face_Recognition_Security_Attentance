@@ -28,11 +28,15 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     super.initState();
 
     if (widget.cameras.isNotEmpty) {
+      final frontCamera = widget.cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => widget.cameras.first,
+      );
+
       _controller = CameraController(
-        widget.cameras.firstWhere(
-          (camera) => camera.lensDirection == CameraLensDirection.front,
-        ),
+        frontCamera,
         ResolutionPreset.medium,
+        enableAudio: false,
       );
 
       _initializeControllerFuture = _controller.initialize();
@@ -57,33 +61,40 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         _isEnrolling = true;
       });
 
+      // Make sure the camera is ready
       await _initializeControllerFuture;
 
+      // 🔥 FIX: Add delay to avoid camera hang problem
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Take picture
       final XFile imageFile = await _controller.takePicture();
       final File file = File(imageFile.path);
 
       final userService = Provider.of<UserService>(context, listen: false);
 
       final result = await userService.enrollUser(
-        name: _nameController.text,
-        employeeId: _employeeIdController.text,
+        name: _nameController.text.trim(),
+        employeeId: _employeeIdController.text.trim(),
         accessLevel: 'employee',
         imageFile: file,
       );
 
-      if (result["success"]) {
+      if (result["success"] == true) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Enrollment Successful!")),
+          const SnackBar(content: Text("Enrollment Successful!")),
         );
+
+        // Reset fields
         _nameController.clear();
         _employeeIdController.clear();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Enrollment Failed: ${result['message']}")),
+          SnackBar(content: Text("Enrollment Failed: ${result["message"]}")),
         );
       }
     } catch (e) {
-      print(e);
+      print("Enrollment Error: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Error: $e")),
       );
@@ -97,7 +108,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Admin Enrollment")),
+      appBar: AppBar(title: const Text("Admin Enrollment")),
       body: FutureBuilder(
         future: _initializeControllerFuture,
         builder: (context, snapshot) {
@@ -108,31 +119,46 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 key: _formKey,
                 child: Column(
                   children: [
-                    SizedBox(height: 300, child: CameraPreview(_controller)),
-                    SizedBox(height: 20),
+                    SizedBox(
+                      height: 300,
+                      child: CameraPreview(_controller),
+                    ),
+                    const SizedBox(height: 20),
                     TextFormField(
                       controller: _nameController,
-                      decoration: InputDecoration(labelText: "Full Name"),
-                      validator: (value) => value!.isEmpty ? "Required" : null,
+                      decoration: const InputDecoration(
+                        labelText: "Full Name",
+                      ),
+                      validator: (value) =>
+                          value!.isEmpty ? "Name is required" : null,
                     ),
                     TextFormField(
                       controller: _employeeIdController,
-                      decoration: InputDecoration(labelText: "Employee ID"),
-                      validator: (value) => value!.isEmpty ? "Required" : null,
+                      decoration: const InputDecoration(
+                        labelText: "Employee ID",
+                      ),
+                      validator: (value) =>
+                          value!.isEmpty ? "Employee ID is required" : null,
                     ),
-                    SizedBox(height: 30),
+                    const SizedBox(height: 30),
                     ElevatedButton(
-                      onPressed: _isEnrolling ? null : _takePictureAndEnroll,
+                      onPressed:
+                          _isEnrolling ? null : () => _takePictureAndEnroll(),
                       child: _isEnrolling
-                          ? CircularProgressIndicator()
-                          : Text("Take Picture & Enroll"),
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text("Take Picture & Enroll"),
                     ),
                   ],
                 ),
               ),
             );
           }
-          return Center(child: CircularProgressIndicator());
+
+          return const Center(child: CircularProgressIndicator());
         },
       ),
     );
