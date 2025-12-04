@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Form, File, UploadFile, status
+from fastapi import APIRouter, Depends, Form, File, UploadFile, status, HTTPException
 from app.domains.user.schemas import UserCreate, UserOut
 from app.domains.user.service import UserService
 from app.dependencies import get_user_service
@@ -26,6 +26,9 @@ async def enroll_user_endpoint(
     result = await user_service.enroll_user(user_data, image_bytes)
 
     if not result:
-        return {"error": "Face not detected"}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Face not detected in the image. Please try again with a clear face photo."
+        )
 
     return result

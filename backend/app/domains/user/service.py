@@ -6,6 +6,8 @@ Business logic for user enrollment and face recognition
 from typing import Optional, List
 import numpy as np
 import cv2
+import os
+import tempfile
 from deepface import DeepFace
 from fastapi.concurrency import run_in_threadpool
 
@@ -27,8 +29,10 @@ class UserService:
         """
         Decode image bytes using OpenCV and extract DeepFace embeddings
         ASYNCHRONOUSLY using run_in_threadpool.
+        Works on both Windows and Linux.
         """
 
+        temp_path = None
         try:
             # 1. Convert bytes to NumPy array
             nparr = np.frombuffer(image_data, np.uint8)
@@ -40,9 +44,18 @@ class UserService:
                 print("❌ OpenCV failed to decode image.")
                 return None
 
-            # 3. Save to temp file
-            temp_path = "/tmp/temp_face.jpg"
-            cv2.imwrite(temp_path, img)
+            # 3. Save to temp file (Windows & Linux compatible)
+            # Create a temporary file in the system's temp directory
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+                temp_path = tmp_file.name
+            
+            # Write the image to the temp file
+            success = cv2.imwrite(temp_path, img)
+            if not success:
+                print(f"❌ Failed to write image to {temp_path}")
+                return None
+
+            print(f"✅ Image saved to: {temp_path}")
 
             # 4. Run DeepFace in a thread (IMPORTANT FIX)
             embedding_objs = await run_in_threadpool(
@@ -54,6 +67,7 @@ class UserService:
 
             # 5. Return the embedding
             if embedding_objs and len(embedding_objs) > 0:
+                print(f"✅ Face detected and encoded successfully")
                 return embedding_objs[0]["embedding"]
 
             print("❌ DeepFace could not detect a face.")
@@ -62,6 +76,15 @@ class UserService:
         except Exception as e:
             print(f"❌ Error during face encoding: {e}")
             return None
+        
+        finally:
+            # Clean up temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                    print(f"✅ Cleaned up temp file: {temp_path}")
+                except Exception as e:
+                    print(f"⚠️ Could not delete temp file: {e}")
 
     async def enroll_user(self, user_data: UserCreate, image_data: bytes) -> Optional[UserOut]:
         """
