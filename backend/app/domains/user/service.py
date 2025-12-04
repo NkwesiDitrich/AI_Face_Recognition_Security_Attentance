@@ -62,7 +62,7 @@ class UserService:
                 DeepFace.represent,
                 img_path=temp_path,
                 model_name="VGG-Face",
-                enforce_detection=True
+                enforce_detection=False
             )
 
             # 5. Return the embedding
