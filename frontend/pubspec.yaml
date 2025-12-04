@@ -22,3 +22,13 @@ dependencies:
 
   # State management (recommended)
   provider: ^6.1.2
+  
+  # Image processing for face detection fix
+  image: ^4.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

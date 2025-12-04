@@ -35,7 +35,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
       _controller = CameraController(
         frontCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.high, // ✅ CHANGED FROM medium TO high
         enableAudio: false,
       );
 
@@ -71,6 +71,8 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       final XFile imageFile = await _controller.takePicture();
       final File file = File(imageFile.path);
 
+      print("📸 Picture taken: ${file.path}");
+
       final userService = Provider.of<UserService>(context, listen: false);
 
       final result = await userService.enrollUser(
@@ -81,22 +83,33 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       );
 
       if (result["success"] == true) {
+        print("✅ Enrollment successful!");
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Enrollment Successful!")),
+          const SnackBar(
+            content: Text("✅ Enrollment Successful!"),
+            backgroundColor: Colors.green,
+          ),
         );
 
         // Reset fields
         _nameController.clear();
         _employeeIdController.clear();
       } else {
+        print("❌ Enrollment failed: ${result["message"]}");
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Enrollment Failed: ${result["message"]}")),
+          SnackBar(
+            content: Text("❌ Enrollment Failed: ${result["message"]}"),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } catch (e) {
-      print("Enrollment Error: $e");
+      print("❌ Enrollment Error: $e");
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: $e")),
+        SnackBar(
+          content: Text("❌ Error: $e"),
+          backgroundColor: Colors.red,
+        ),
       );
     } finally {
       setState(() {
@@ -108,7 +121,10 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Admin Enrollment")),
+      appBar: AppBar(
+        title: const Text("Admin Enrollment"),
+        backgroundColor: Colors.blue,
+      ),
       body: FutureBuilder(
         future: _initializeControllerFuture,
         builder: (context, snapshot) {
@@ -119,38 +135,129 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                 key: _formKey,
                 child: Column(
                   children: [
-                    SizedBox(
+                    // 🔥 IMPROVED CAMERA PREVIEW WITH GUIDE
+                    Container(
                       height: 300,
-                      child: CameraPreview(_controller),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.blue, width: 2),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Stack(
+                        children: [
+                          CameraPreview(_controller),
+                          // Face detection guide overlay
+                          Center(
+                            child: Container(
+                              width: 200,
+                              height: 250,
+                              decoration: BoxDecoration(
+                                border:
+                                    Border.all(color: Colors.green, width: 3),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.face,
+                                    color: Colors.green,
+                                    size: 50,
+                                  ),
+                                  SizedBox(height: 10),
+                                  Text(
+                                    "Position your face here",
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      shadows: [
+                                        Shadow(
+                                          blurRadius: 3,
+                                          color: Colors.black,
+                                        ),
+                                      ],
+                                    ),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                     const SizedBox(height: 20),
+
+                    // Name field
                     TextFormField(
                       controller: _nameController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: "Full Name",
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        prefixIcon: const Icon(Icons.person),
                       ),
                       validator: (value) =>
                           value!.isEmpty ? "Name is required" : null,
                     ),
+                    const SizedBox(height: 15),
+
+                    // Employee ID field
                     TextFormField(
                       controller: _employeeIdController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: "Employee ID",
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        prefixIcon: const Icon(Icons.badge),
                       ),
                       validator: (value) =>
                           value!.isEmpty ? "Employee ID is required" : null,
                     ),
                     const SizedBox(height: 30),
-                    ElevatedButton(
-                      onPressed:
-                          _isEnrolling ? null : () => _takePictureAndEnroll(),
-                      child: _isEnrolling
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text("Take Picture & Enroll"),
+
+                    // Enroll button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        onPressed:
+                            _isEnrolling ? null : () => _takePictureAndEnroll(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue,
+                          disabledBackgroundColor: Colors.grey,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: _isEnrolling
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
+                                ),
+                              )
+                            : const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.camera_alt),
+                                  SizedBox(width: 10),
+                                  Text(
+                                    "Take Picture & Enroll",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                      ),
                     ),
                   ],
                 ),
