@@ -6,7 +6,8 @@ from app.domains.user.models import User
 
 class UserRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
-        self.collection = db.get_collection("users")
+        # ✅ FIXED: Use bracket notation instead of get_collection()
+        self.collection = db["users"]
 
     async def add_user(self, user: User) -> User:
         user_dict = user.dict(by_alias=True)
@@ -30,9 +31,21 @@ class UserRepository:
             return User(**doc)
         return None
 
-    # Placeholders (we implement later)
     async def update_user(self, user_id: str, data: dict) -> bool:
-        pass
+        """Update user information."""
+        if not ObjectId.is_valid(user_id):
+            return False
+        
+        result = await self.collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": data}
+        )
+        return result.modified_count > 0
 
     async def delete_user(self, user_id: str) -> bool:
-        pass
+        """Delete a user."""
+        if not ObjectId.is_valid(user_id):
+            return False
+        
+        result = await self.collection.delete_one({"_id": ObjectId(user_id)})
+        return result.deleted_count > 0
