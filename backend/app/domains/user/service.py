@@ -1,3 +1,5 @@
+# backend/app/domains/user/service.py
+
 """
 User Service Layer
 Business logic for user enrollment and face recognition
@@ -10,6 +12,7 @@ import os
 import tempfile
 from deepface import DeepFace
 from fastapi.concurrency import run_in_threadpool
+import base64 # <-- NEW IMPORT
 
 from app.domains.user.models import User
 from app.domains.user.schemas import UserCreate, UserOut
@@ -29,7 +32,6 @@ class UserService:
         """
         Decode image bytes using OpenCV and extract DeepFace embeddings
         ASYNCHRONOUSLY using run_in_threadpool.
-        Works on both Windows and Linux.
         """
 
         temp_path = None
@@ -45,7 +47,6 @@ class UserService:
                 return None
 
             # 3. Save to temp file (Windows & Linux compatible)
-            # Create a temporary file in the system's temp directory
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
                 temp_path = tmp_file.name
             
@@ -57,7 +58,7 @@ class UserService:
 
             print(f"✅ Image saved to: {temp_path}")
 
-            # 4. Run DeepFace in a thread (IMPORTANT FIX)
+            # 4. Run DeepFace in a thread
             embedding_objs = await run_in_threadpool(
                 DeepFace.represent,
                 img_path=temp_path,
@@ -88,18 +89,25 @@ class UserService:
 
     async def enroll_user(self, user_data: UserCreate, image_data: bytes) -> Optional[UserOut]:
         """
-        Store new user with extracted face embedding
+        Store new user with extracted face embedding and Base64 image data.
         """
+        
+        # 1. Extract Encoding
         encoding = await self._extract_encoding(image_data)
 
         if not encoding:
             return None  # face not detected
 
+        # 2. Convert raw image bytes to Base64 string for Admin display
+        image_base64 = base64.b64encode(image_data).decode('utf-8')
+
+        # 3. Create and Save User
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
             access_level=user_data.access_level,
             face_encodings=encoding,
+            image_base64=image_base64, # <-- NEW: Save Base64 image
         )
 
         saved_user = await self.user_repo.add_user(new_user)

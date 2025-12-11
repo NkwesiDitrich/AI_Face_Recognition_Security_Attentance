@@ -1,10 +1,9 @@
 # backend/app/main.py
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool # <-- CRITICAL IMPORT
 from app.core.database import connect_to_mongo, close_mongo_connection
 from app.core.ai_model import load_ai_models
-from fastapi.concurrency import run_in_threadpool
-
 
 # Routers (uncommented)
 from app.api.v1.user import router as user_router
@@ -23,7 +22,7 @@ app = FastAPI(
 async def startup_event():
     await connect_to_mongo()
     # FIX: Run the synchronous model loading in a separate thread
-    await run_in_threadpool(load_ai_models)
+    await run_in_threadpool(load_ai_models) # <-- CRITICAL FIX
 
 @app.on_event("shutdown")
 async def shutdown_event():

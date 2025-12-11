@@ -7,7 +7,7 @@ from typing import Any, Dict
 ai_model: Dict[str, Any] = {}
 
 
-def load_ai_models():
+def load_ai_models(): # <-- NOTE: This is a synchronous function (no 'async')
     """Loads the necessary AI models into memory (DeepFace, Liveness, etc.)."""
     global ai_model
     print("Loading AI Models...")

@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 import tempfile
 import os
+import asyncio # <-- NEW: For the processing lock
 
 # DeepFace match threshold (same as user service)
 VERIFICATION_THRESHOLD = 0.6
@@ -19,6 +20,7 @@ class AttendanceService:
     def __init__(self, attendance_repo: AttendanceRepository, user_service: UserService):
         self.attendance_repo = attendance_repo
         self.user_service = user_service
+        self._processing_lock = asyncio.Lock() # <-- NEW: Lock to prevent server crash
 
     async def _extract_encoding_and_liveness(self, image_data: bytes) -> Dict[str, Any]:
         """
@@ -42,7 +44,6 @@ class AttendanceService:
                 return {"status": "error", "encoding": None, "liveness": "fail", "message": "Failed to write image."}
 
             # 3. DeepFace Analysis (Emotion and Encoding) ASYNCHRONOUSLY
-            # We use analyze for emotion and represent for encoding
             
             # 3a. Analyze for Emotion (Liveness Check)
             analysis_results = await run_in_threadpool(
@@ -59,8 +60,9 @@ class AttendanceService:
             face_result = analysis_results[0]
             dominant_emotion = face_result.get('dominant_emotion', 'neutral')
             
-            # Basic Liveness Check: Requires a non-negative emotion
-            liveness_emotion_status = "pass" if dominant_emotion in ['happy', 'surprise', 'neutral'] else "fail"
+            # RELAXED LIVENESS LOGIC: Only fail on clearly negative emotions
+            negative_emotions = ['sad', 'angry', 'fear', 'disgust']
+            liveness_emotion_status = "fail" if dominant_emotion in negative_emotions else "pass"
             
             # 3b. Extract Encoding for Recognition
             embedding_objs = await run_in_threadpool(
@@ -75,7 +77,7 @@ class AttendanceService:
             if encoding is None:
                 return {"status": "error", "encoding": None, "liveness": "fail", "message": "Failed to extract face encoding."}
 
-            liveness_status = "pass" if liveness_emotion_status == "pass" else "fail"
+            liveness_status = liveness_emotion_status
 
             return {
                 "status": "face_detected",
@@ -87,6 +89,8 @@ class AttendanceService:
             
         except Exception as e:
             print(f"Error in _extract_encoding_and_liveness: {e}")
+            import traceback
+            traceback.print_exc()
             return {"status": "error", "encoding": None, "liveness": "fail", "message": f"Server Error: {e}"}
         
         finally:
@@ -100,58 +104,67 @@ class AttendanceService:
     async def process_attendance_frame(self, image_data: bytes) -> Dict[str, Any]:
         """
         Core logic for attendance: Liveness -> Recognition -> Logging.
+        Uses a lock to ensure only one frame is processed at a time.
         """
-        analysis = await self._extract_encoding_and_liveness(image_data)
-        
-        # 1. Check for Face Detection / Decoding Errors
-        if analysis['status'] != 'face_detected':
-            return {"message": analysis['message'], "user": None, "status": "fail"}
+        # Check if a frame is already being processed
+        if self._processing_lock.locked():
+            # Drop frame to prevent server overload
+            return {"message": "Processing previous frame...", "user": None, "status": "processing"}
 
-        # 2. Check Liveness
-        if analysis['liveness'] == 'fail':
+        async with self._processing_lock:
+            print("[DEBUG] Processing attendance frame...")
+            
+            analysis = await self._extract_encoding_and_liveness(image_data)
+            
+            # 1. Check for Face Detection / Decoding Errors
+            if analysis['status'] != 'face_detected':
+                return {"message": analysis['message'], "user": None, "status": "fail"}
+
+            # 2. Check Liveness
+            if analysis['liveness'] == 'fail':
+                return {
+                    "message": f"Liveness Check Failed. Detected Emotion: {analysis['emotion']}",
+                    "user": None,
+                    "status": "fail"
+                }
+
+            # 3. Recognition
+            target_encoding_np = np.array(analysis['encoding'])
+            known_users = await self.user_service.user_repo.get_all_encodings()
+            
+            best_match: Optional[Tuple[User, float]] = None
+            
+            for user in known_users:
+                if not user.face_encodings:
+                    continue
+                
+                known_encoding_np = np.array(user.face_encodings)
+                # Calculate Euclidean distance
+                distance = np.linalg.norm(target_encoding_np - known_encoding_np)
+                
+                if distance < VERIFICATION_THRESHOLD:
+                    if best_match is None or distance < best_match[1]:
+                        best_match = (user, distance)
+
+            if best_match:
+                matched_user = best_match[0]
+                
+                # 4. Logging
+                log_data = AttendanceLog(
+                    user_id=str(matched_user.id),
+                    event_type="check_in",
+                    liveness_status="pass",
+                )
+                await self.attendance_repo.add_log(log_data)
+                
+                return {
+                    "message": f"Welcome, {matched_user.name}! Check-in Successful. Distance: {best_match[1]:.4f}",
+                    "user": matched_user.name,
+                    "status": "success"
+                }
+
             return {
-                "message": f"Liveness Check Failed. Detected Emotion: {analysis['emotion']}",
+                "message": f"Recognition Failed. User not found. Liveness: {analysis['emotion']}",
                 "user": None,
                 "status": "fail"
             }
-
-        # 3. Recognition
-        target_encoding_np = np.array(analysis['encoding'])
-        known_users = await self.user_service.user_repo.get_all_encodings()
-        
-        best_match: Optional[Tuple[User, float]] = None
-        
-        for user in known_users:
-            if not user.face_encodings:
-                continue
-            
-            known_encoding_np = np.array(user.face_encodings)
-            # Calculate Euclidean distance
-            distance = np.linalg.norm(target_encoding_np - known_encoding_np)
-            
-            if distance < VERIFICATION_THRESHOLD:
-                if best_match is None or distance < best_match[1]:
-                    best_match = (user, distance)
-
-        if best_match:
-            matched_user = best_match[0]
-            
-            # 4. Logging
-            log_data = AttendanceLog(
-                user_id=str(matched_user.id),
-                event_type="check_in",
-                liveness_status="pass",
-            )
-            await self.attendance_repo.add_log(log_data)
-            
-            return {
-                "message": f"Welcome, {matched_user.name}! Check-in Successful. Distance: {best_match[1]:.4f}",
-                "user": matched_user.name,
-                "status": "success"
-            }
-
-        return {
-            "message": f"Recognition Failed. User not found. Liveness: {analysis['emotion']}",
-            "user": None,
-            "status": "fail"
-        }
