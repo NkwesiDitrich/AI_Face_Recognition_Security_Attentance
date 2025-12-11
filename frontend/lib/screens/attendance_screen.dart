@@ -1,12 +1,16 @@
+// frontend/lib/screens/attendance_screen.dart
+
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:ai_face_attendance_frontend/utils/image_converter.dart'; // Import the new utility
 
 class AttendanceScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
+
   const AttendanceScreen({super.key, required this.cameras});
 
   @override
@@ -16,7 +20,6 @@ class AttendanceScreen extends StatefulWidget {
 class _AttendanceScreenState extends State<AttendanceScreen> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
-
   late WebSocketChannel _channel;
   String _statusMessage = "Connecting to server...";
   Timer? _timer;
@@ -94,10 +97,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       // Send one frame every 500ms
       if (_timer == null || !_timer!.isActive) {
         _timer = Timer(const Duration(milliseconds: 500), () async {
-          // TEMPORARY PLACEHOLDER
-          _channel.sink.add(Uint8List.fromList([1, 2, 3, 4]));
+          // Convert CameraImage to JPEG bytes
+          final Uint8List? jpegBytes = convertYUV420toImage(image);
 
-          // (Real image conversion comes later)
+          if (jpegBytes != null) {
+            // Send the actual image data
+            _channel.sink.add(jpegBytes);
+          } else {
+            print("Error: Failed to convert CameraImage to JPEG.");
+          }
+
           _timer = null;
         });
       }
