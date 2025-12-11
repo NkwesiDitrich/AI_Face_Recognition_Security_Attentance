@@ -1,7 +1,8 @@
 # backend/app/main.py
 
 from fastapi import FastAPI
-from fastapi.concurrency import run_in_threadpool # <-- CRITICAL IMPORT
+from fastapi.concurrency import run_in_threadpool
+import asyncio # <-- NEW IMPORT for the fix
 from app.core.database import connect_to_mongo, close_mongo_connection
 from app.core.ai_model import load_ai_models
 
@@ -21,8 +22,9 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     await connect_to_mongo()
-    # FIX: Run the synchronous model loading in a separate thread
-    await run_in_threadpool(load_ai_models) # <-- CRITICAL FIX
+    # FINAL FIX: Use asyncio.to_thread to reliably run the synchronous DeepFace loading
+    # This prevents the Uvicorn event loop from being blocked and prematurely cancelled.
+    await asyncio.to_thread(load_ai_models)
 
 @app.on_event("shutdown")
 async def shutdown_event():
