@@ -26,6 +26,9 @@ dependencies:
   # Image processing for face detection fix
   image: ^4.0.0
 
+  # WebSocket client for real-time face attendance
+  web_socket_channel: ^2.4.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
