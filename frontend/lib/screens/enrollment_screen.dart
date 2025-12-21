@@ -4,7 +4,34 @@ import 'package:provider/provider.dart';
 import 'dart:io';
 import 'package:ai_face_attendance_frontend/services/user_service.dart';
 
+/// ============================================================================
+/// ENROLLMENT SCREEN - Face Registration with Image Preview
+/// ============================================================================
+///
+/// This screen allows users to enroll in the face recognition system.
+///
+/// Features:
+/// 1. Camera preview for live face capture
+/// 2. User input for name and employee ID
+/// 3. ✨ NEW: Image preview dialog before enrollment
+/// 4. ✨ NEW: Ability to retake photo if not satisfied
+/// 5. Backend integration with duplicate detection
+///
+/// Flow:
+/// 1. User enters name and employee ID
+/// 2. Camera preview shown
+/// 3. User clicks "Take Picture & Enroll"
+/// 4. Image captured and preview dialog shown
+/// 5. User confirms "Face looks good" or "Retake"
+/// 6. If confirmed → Send to backend
+/// 7. If retake → Return to camera preview
+/// 8. Backend processes enrollment with duplicate detection
+/// 9. Success/Error message shown
+///
+/// ============================================================================
+
 class EnrollmentScreen extends StatefulWidget {
+  /// List of available cameras on the device
   final List<CameraDescription> cameras;
 
   const EnrollmentScreen({super.key, required this.cameras});
@@ -14,31 +41,42 @@ class EnrollmentScreen extends StatefulWidget {
 }
 
 class _EnrollmentScreenState extends State<EnrollmentScreen> {
+  /// Camera controller for managing camera operations
   late CameraController _controller;
+
+  /// Future that initializes the camera controller
   late Future<void> _initializeControllerFuture;
 
+  /// Form key for validating user input
   final _formKey = GlobalKey<FormState>();
+
+  /// Text controllers for user input
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _employeeIdController = TextEditingController();
 
+  /// State flags
   bool _isEnrolling = false;
 
   @override
   void initState() {
     super.initState();
 
+    // Initialize camera controller with front-facing camera
     if (widget.cameras.isNotEmpty) {
+      // Find front camera, fallback to first camera if not available
       final frontCamera = widget.cameras.firstWhere(
         (camera) => camera.lensDirection == CameraLensDirection.front,
         orElse: () => widget.cameras.first,
       );
 
+      // Create camera controller with high resolution
       _controller = CameraController(
         frontCamera,
         ResolutionPreset.high,
         enableAudio: false,
       );
 
+      // Initialize the controller asynchronously
       _initializeControllerFuture = _controller.initialize();
     } else {
       _initializeControllerFuture = Future.error("No cameras available");
@@ -47,32 +85,204 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
   @override
   void dispose() {
+    // Clean up resources
     _controller.dispose();
     _nameController.dispose();
     _employeeIdController.dispose();
     super.dispose();
   }
 
+  /// =========================================================================
+  /// ✨ NEW METHOD: Show Image Preview Dialog
+  /// =========================================================================
+  ///
+  /// Displays the captured image in a dialog and asks user to confirm.
+  ///
+  /// Parameters:
+  ///   - imageFile: The captured image file
+  ///
+  /// Returns:
+  ///   - true: User confirmed the image looks good
+  ///   - false: User wants to retake the photo
+  ///
+  /// =========================================================================
+  Future<bool> _showImagePreviewDialog(File imageFile) async {
+    print("📸 Showing image preview dialog...");
+
+    return await showDialog<bool>(
+          context: context,
+          barrierDismissible: false, // User must make a choice
+          builder: (BuildContext context) {
+            return AlertDialog(
+              // Dialog title
+              title: const Text(
+                "Confirm Face Image",
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              // Dialog content with image preview
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Instructions
+                    const Text(
+                      "Is your face clearly visible?",
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Display the captured image
+                    Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: Colors.blue,
+                          width: 2,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.file(
+                          imageFile,
+                          height: 300,
+                          width: 300,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Additional instructions
+                    const Text(
+                      "Make sure your face is clearly visible and well-lit",
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontStyle: FontStyle.italic,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+
+              // Dialog actions (buttons)
+              actions: [
+                // Retake button
+                TextButton(
+                  onPressed: () {
+                    print("❌ User clicked 'Retake' - returning to camera");
+                    Navigator.pop(context, false); // Return false to retake
+                  },
+                  child: const Text(
+                    "Retake",
+                    style: TextStyle(
+                      color: Colors.orange,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+
+                // Confirm button
+                ElevatedButton(
+                  onPressed: () {
+                    print(
+                        "✅ User clicked 'Confirm & Enroll' - proceeding with enrollment");
+                    Navigator.pop(context, true); // Return true to proceed
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text("Confirm & Enroll"),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false; // Default to false if dialog is dismissed
+  }
+
+  /// =========================================================================
+  /// MODIFIED METHOD: Take Picture and Enroll
+  /// =========================================================================
+  ///
+  /// Main enrollment workflow:
+  /// 1. Validate user input
+  /// 2. Capture image from camera
+  /// 3. ✨ NEW: Show image preview dialog
+  /// 4. If user confirms → Send to backend
+  /// 5. If user retakes → Return to camera
+  /// 6. Handle backend response (success/duplicate/error)
+  ///
+  /// =========================================================================
   Future<void> _takePictureAndEnroll() async {
-    if (_isEnrolling || !_formKey.currentState!.validate()) return;
+    // Validate form and check if already enrolling
+    if (_isEnrolling || !_formKey.currentState!.validate()) {
+      print("⚠️ Form validation failed or already enrolling");
+      return;
+    }
 
     try {
+      // Set loading state
       setState(() {
         _isEnrolling = true;
       });
 
+      print("📸 Starting enrollment process...");
+
       // Make sure the camera is ready
       await _initializeControllerFuture;
 
-      // 🔥 FIX: Add delay to avoid camera hang problem
+      // Add delay to avoid camera hang problem
       await Future.delayed(const Duration(milliseconds: 500));
 
-      // Take picture
+      // Step 1: Capture image from camera
+      print("📷 Capturing image from camera...");
       final XFile imageFile = await _controller.takePicture();
       final File file = File(imageFile.path);
+      print("✅ Image captured: ${file.path}");
 
+      // Step 2: ✨ NEW - Show image preview dialog
+      print("🖼️ Showing image preview dialog...");
+      final confirmed = await _showImagePreviewDialog(file);
+
+      // Step 3: Check user's choice
+      if (!confirmed) {
+        // User clicked "Retake" - go back to camera
+        print("↩️ User chose to retake - returning to camera preview");
+        setState(() {
+          _isEnrolling = false;
+        });
+
+        // Show snackbar informing user
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("📸 Ready to take another photo"),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+
+      // Step 4: User confirmed - proceed with enrollment
+      print("✅ User confirmed image - proceeding with enrollment");
+
+      // Get user service from provider
       final userService = Provider.of<UserService>(context, listen: false);
 
+      // Step 5: Send enrollment request to backend
+      print("📤 Sending enrollment request to backend...");
       final result = await userService.enrollUser(
         name: _nameController.text.trim(),
         employeeId: _employeeIdController.text.trim(),
@@ -80,25 +290,57 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         imageFile: file,
       );
 
+      // Step 6: Handle backend response
       if (result["success"] == true) {
+        // Success: User enrolled successfully
+        print("✅ Enrollment successful!");
+
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Enrollment Successful!")),
+          const SnackBar(
+            content: Text("✅ Enrollment Successful!"),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 3),
+          ),
         );
 
-        // Reset fields
+        // Reset form fields for next enrollment
         _nameController.clear();
         _employeeIdController.clear();
       } else {
+        // Error: Enrollment failed
+        print("❌ Enrollment failed: ${result["message"]}");
+
+        // Extract error message
+        String errorMessage = result["message"] ?? "Enrollment failed";
+
+        // ✨ NEW: Handle duplicate error with special message
+        if (errorMessage.contains("already registered") ||
+            errorMessage.contains("duplicate")) {
+          errorMessage = "⚠️ This face is already registered!\n"
+              "Please use a different face or contact admin.";
+        }
+
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Enrollment Failed: ${result["message"]}")),
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+          ),
         );
       }
     } catch (e) {
-      print("Enrollment Error: $e");
+      // Handle unexpected errors
+      print("❌ Enrollment Error: $e");
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: $e")),
+        SnackBar(
+          content: Text("Error: $e"),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
       );
     } finally {
+      // Reset loading state
       setState(() {
         _isEnrolling = false;
       });
@@ -108,49 +350,175 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Admin Enrollment")),
+      // App bar with title
+      appBar: AppBar(
+        title: const Text("Face Enrollment"),
+        elevation: 0,
+      ),
+
+      // Main body
       body: FutureBuilder(
         future: _initializeControllerFuture,
         builder: (context, snapshot) {
+          // Camera initialized successfully
           if (snapshot.connectionState == ConnectionState.done) {
             return SingleChildScrollView(
               padding: const EdgeInsets.all(16),
               child: Form(
                 key: _formKey,
                 child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    SizedBox(
-                      height: 300,
-                      child: CameraPreview(_controller),
+                    // =====================================================
+                    // CAMERA PREVIEW SECTION
+                    // =====================================================
+                    Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: Colors.blue,
+                          width: 2,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: SizedBox(
+                          height: 300,
+                          child: CameraPreview(_controller),
+                        ),
+                      ),
                     ),
+
                     const SizedBox(height: 20),
+
+                    // =====================================================
+                    // USER INPUT SECTION
+                    // =====================================================
+
+                    // Full Name input field
                     TextFormField(
                       controller: _nameController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: "Full Name",
+                        hintText: "Enter your full name",
+                        prefixIcon: const Icon(Icons.person),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
-                      validator: (value) =>
-                          value!.isEmpty ? "Name is required" : null,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return "Name is required";
+                        }
+                        if (value.length < 2) {
+                          return "Name must be at least 2 characters";
+                        }
+                        return null;
+                      },
                     ),
+
+                    const SizedBox(height: 16),
+
+                    // Employee ID input field
                     TextFormField(
                       controller: _employeeIdController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: "Employee ID",
+                        hintText: "Enter your employee ID",
+                        prefixIcon: const Icon(Icons.badge),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
-                      validator: (value) =>
-                          value!.isEmpty ? "Employee ID is required" : null,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return "Employee ID is required";
+                        }
+                        if (value.length < 2) {
+                          return "Employee ID must be at least 2 characters";
+                        }
+                        return null;
+                      },
                     ),
+
                     const SizedBox(height: 30),
-                    ElevatedButton(
+
+                    // =====================================================
+                    // ACTION BUTTON SECTION
+                    // =====================================================
+
+                    ElevatedButton.icon(
                       onPressed:
                           _isEnrolling ? null : () => _takePictureAndEnroll(),
-                      child: _isEnrolling
+                      icon: _isEnrolling
                           ? const SizedBox(
                               height: 20,
                               width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
+                              ),
                             )
-                          : const Text("Take Picture & Enroll"),
+                          : const Icon(Icons.camera_alt),
+                      label: Text(
+                        _isEnrolling
+                            ? "Processing..."
+                            : "Take Picture & Enroll",
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey,
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // =====================================================
+                    // INSTRUCTIONS SECTION
+                    // =====================================================
+
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.blue.withOpacity(0.3),
+                        ),
+                      ),
+                      child: const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "📋 Instructions:",
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            "1. Enter your full name and employee ID\n"
+                            "2. Position your face in the camera\n"
+                            "3. Click 'Take Picture & Enroll'\n"
+                            "4. Review the image preview\n"
+                            "5. Click 'Confirm & Enroll' to proceed\n"
+                            "6. Or click 'Retake' to try again",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -158,7 +526,17 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
             );
           }
 
-          return const Center(child: CircularProgressIndicator());
+          // Camera still initializing
+          return const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text("Initializing camera..."),
+              ],
+            ),
+          );
         },
       ),
     );
