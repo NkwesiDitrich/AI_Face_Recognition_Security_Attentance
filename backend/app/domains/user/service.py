@@ -107,15 +107,58 @@ class UserService:
             )
 
             # 5. Return the embedding vector
+            # ✅ FIX: Handle all possible DeepFace response formats
             if embedding_objs and len(embedding_objs) > 0:
                 print(f"✅ Face detected and encoded successfully")
-                return embedding_objs[0]["embedding"]
+                print(f"📊 DeepFace response type: {type(embedding_objs).__name__}")
+                print(f"📊 First element type: {type(embedding_objs[0]).__name__}")
+                
+                embedding_obj = embedding_objs[0]
+                
+                # ✅ FIX: Try multiple ways to extract the embedding
+                
+                # Method 1: If it's a dictionary with "embedding" key
+                if isinstance(embedding_obj, dict):
+                    if "embedding" in embedding_obj:
+                        embedding = embedding_obj["embedding"]
+                        print(f"✅ Embedding extracted from dict['embedding'] (type: {type(embedding).__name__})")
+                        # Convert to list if it's numpy array
+                        if isinstance(embedding, np.ndarray):
+                            embedding = embedding.tolist()
+                        return embedding
+                    else:
+                        print(f"❌ Dictionary found but no 'embedding' key. Keys: {embedding_obj.keys()}")
+                        return None
+                
+                # Method 2: If it's directly a list
+                elif isinstance(embedding_obj, list):
+                    print(f"✅ Embedding extracted as list (length: {len(embedding_obj)})")
+                    return embedding_obj
+                
+                # Method 3: If it's a numpy array
+                elif isinstance(embedding_obj, np.ndarray):
+                    print(f"✅ Embedding extracted as numpy array (shape: {embedding_obj.shape})")
+                    return embedding_obj.tolist()
+                
+                # Method 4: If it's a single float/number (shouldn't happen, but handle it)
+                elif isinstance(embedding_obj, (float, int)):
+                    print(f"❌ Got single number instead of embedding: {embedding_obj}")
+                    print(f"❌ This suggests DeepFace.represent() returned unexpected format")
+                    return None
+                
+                else:
+                    # Unexpected format
+                    print(f"❌ Unexpected embedding format: {type(embedding_obj).__name__}")
+                    print(f"❌ Embedding object: {embedding_obj}")
+                    return None
 
             print("❌ DeepFace could not detect a face.")
             return None
 
         except Exception as e:
             print(f"❌ Error during face encoding: {e}")
+            import traceback
+            traceback.print_exc()
             return None
         
         finally:
