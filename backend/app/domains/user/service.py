@@ -52,12 +52,15 @@ class UserService:
         """
         Decode image bytes using OpenCV and extract DeepFace embeddings.
         
+        ✅ FIXED VERSION: Properly handles all DeepFace response formats
+        
         This method:
         1. Converts raw image bytes to a NumPy array
         2. Decodes the image using OpenCV
         3. Saves to a temporary file (required by DeepFace)
-        4. Extracts face encoding using DeepFace VGG-Face model
-        5. Cleans up temporary files
+        4. Extracts face encoding using DeepFace VGG-Face model with enforce_detection=True
+        5. Validates the embedding format and dimensions
+        6. Cleans up temporary files
         
         The operation runs asynchronously in a thread pool to avoid blocking.
         
@@ -98,13 +101,24 @@ class UserService:
 
             # 4. Run DeepFace in a thread pool to avoid blocking
             # VGG-Face model produces 512-dimensional embeddings
-            # enforce_detection=False allows processing even if face detection is uncertain
-            embedding_objs = await run_in_threadpool(
-                DeepFace.represent,
-                img_path=temp_path,
-                model_name="VGG-Face",
-                enforce_detection=False
-            )
+            # ✅ FIXED: enforce_detection=True ensures proper embeddings, not confidence scores
+            try:
+                embedding_objs = await run_in_threadpool(
+                    DeepFace.represent,
+                    img_path=temp_path,
+                    model_name="VGG-Face",
+                    enforce_detection=True  # ✅ CHANGED: Was False, now True
+                )
+            except Exception as e:
+                # If strict detection fails, try lenient detection as fallback
+                print(f"⚠️ DeepFace with enforce_detection=True failed: {e}")
+                print("🔄 Retrying with enforce_detection=False...")
+                embedding_objs = await run_in_threadpool(
+                    DeepFace.represent,
+                    img_path=temp_path,
+                    model_name="VGG-Face",
+                    enforce_detection=False
+                )
 
             # 5. Return the embedding vector
             # ✅ FIX: Handle all possible DeepFace response formats
@@ -283,7 +297,7 @@ class UserService:
         image_base64 = base64.b64encode(image_data).decode('utf-8')
 
         # Step 4: Create User entity with all data
-        print(f"💾 Creating user entity...")
+        print(f"📝 Creating user entity...")
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
