@@ -6,15 +6,21 @@ from app.domains.user.models import User
 
 class UserRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
-        # ✅ FIXED: Use bracket notation instead of get_collection()
         self.collection = db["users"]
 
     async def add_user(self, user: User) -> User:
-        user_dict = user.dict(by_alias=True)
-        result = await self.collection.insert_one(user_dict)
+        # ✅ Use Pydantic v2-safe dump and exclude None so _id isn't inserted as null
+        user_dict = user.model_dump(by_alias=True, exclude_none=True)
 
-        new_user = await self.collection.find_one({"_id": result.inserted_id})
-        return User(**new_user)
+        # Extra safety
+        if user_dict.get("_id") is None:
+            user_dict.pop("_id", None)
+
+        result = await self.collection.insert_one(user_dict)
+        doc = await self.collection.find_one({"_id": result.inserted_id})
+
+        # ✅ doc["_id"] is ObjectId — User model now supports it
+        return User(**doc)
 
     async def get_all_encodings(self) -> List[User]:
         users = []
@@ -32,10 +38,9 @@ class UserRepository:
         return None
 
     async def update_user(self, user_id: str, data: dict) -> bool:
-        """Update user information."""
         if not ObjectId.is_valid(user_id):
             return False
-        
+
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": data}
@@ -43,9 +48,8 @@ class UserRepository:
         return result.modified_count > 0
 
     async def delete_user(self, user_id: str) -> bool:
-        """Delete a user."""
         if not ObjectId.is_valid(user_id):
             return False
-        
+
         result = await self.collection.delete_one({"_id": ObjectId(user_id)})
         return result.deleted_count > 0
