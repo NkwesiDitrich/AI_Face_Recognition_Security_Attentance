@@ -24,12 +24,17 @@ from app.domains.user.models import User
 from app.domains.user.schemas import UserCreate, UserOut
 from app.domains.user.repository import UserRepository
 
-# DeepFace match threshold for face recognition
-VERIFICATION_THRESHOLD = 0.6
+# ------------------------------------------------------------------------------------
+# Thresholds / tuning
+# ------------------------------------------------------------------------------------
 
-# VGG-Face embedding size is 2622 in DeepFace (often), but sometimes 4096/512 depending on pipeline/model.
-# We just need “reasonably large” to distinguish from a single float, etc.
+# Minimum length to consider something a real embedding vector
 MIN_EMBEDDING_LENGTH = 100
+
+# ✅ New: Cosine thresholds (you can tune these)
+# Smaller = stricter (harder to match)
+DUPLICATE_COSINE_THRESHOLD = 0.25      # strict: prevents false duplicate registration
+RECOGNITION_COSINE_THRESHOLD = 0.35    # a bit looser: recognition/search match
 
 
 class UserService:
@@ -51,6 +56,24 @@ class UserService:
     # -----------------------------
     def _is_number(self, x: Any) -> bool:
         return isinstance(x, (int, float, np.number))
+
+    def _l2_normalize(self, vec: List[float]) -> np.ndarray:
+        """
+        L2-normalize embedding vector.
+        This makes cosine distance stable and reduces false positives.
+        """
+        arr = np.array(vec, dtype=np.float32)
+        norm = np.linalg.norm(arr)
+        if norm == 0:
+            return arr
+        return arr / norm
+
+    def _cosine_distance(self, a: np.ndarray, b: np.ndarray) -> float:
+        """
+        Cosine distance = 1 - cosine similarity.
+        Lower distance means more similar.
+        """
+        return float(1.0 - np.dot(a, b))
 
     def _parse_deepface_embedding(self, represent_output: Any) -> Optional[List[float]]:
         """
@@ -89,34 +112,30 @@ class UserService:
                     emb = first["embedding"]
                     if isinstance(emb, np.ndarray):
                         emb = emb.flatten().tolist()
+
                     if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH and all(
                         self._is_number(v) for v in emb
                     ):
                         return [float(v) for v in emb]
                     return None
 
-                # Some forks might use different key naming; print keys for debugging
                 print(f"❌ DeepFace dict returned but no 'embedding' key. Keys: {list(first.keys())}")
                 return None
 
             # B) List[float] => embedding vector directly
             if self._is_number(first):
-                # ensure the whole list is numeric
                 if all(self._is_number(v) for v in represent_output) and len(represent_output) >= MIN_EMBEDDING_LENGTH:
                     return [float(v) for v in represent_output]
-                # if it’s numeric but too short, it’s not a valid embedding
                 print(f"❌ DeepFace returned numeric list but too short (len={len(represent_output)}).")
                 return None
 
-            # C) List[List[float]] (multiple faces embeddings, or wrapper output)
+            # C) List[List[float]]
             if isinstance(first, list):
-                # If first is a list of numbers and long enough, treat it as embedding for first face
                 if len(first) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in first):
                     return [float(v) for v in first]
                 print("❌ DeepFace returned list-of-lists but inner list is not a valid embedding.")
                 return None
 
-            # Anything else is unexpected
             print(f"❌ Unexpected DeepFace output element type: {type(first)}")
             print(f"❌ First element: {first}")
             return None
@@ -192,7 +211,6 @@ class UserService:
 
             embedding = self._parse_deepface_embedding(represent_output)
             if not embedding:
-                # Extra debug to help if it still fails
                 if isinstance(represent_output, list):
                     print(f"📊 DeepFace list length: {len(represent_output)}")
                     if len(represent_output) > 0:
@@ -219,12 +237,15 @@ class UserService:
                     print(f"⚠️ Could not delete temp file: {e}")
 
     # -----------------------------
-    # Duplicate detection
+    # Duplicate detection (FIXED)
     # -----------------------------
     async def _check_duplicate_enrollment(self, new_encoding: List[float]) -> Optional[User]:
         """
-        Check if a face encoding already exists in the system (duplicate detection).
-        Uses Euclidean distance with VERIFICATION_THRESHOLD.
+        ✅ FIXED: Duplicate detection using L2-normalized cosine distance.
+
+        Why:
+        - Euclidean distance on raw VGG-Face embeddings can be too permissive (false duplicates).
+        - Cosine distance on normalized embeddings is much more reliable.
         """
         existing_users = await self.user_repo.get_all_encodings()
 
@@ -232,26 +253,34 @@ class UserService:
             print("✅ No existing users in database - enrollment is unique")
             return None
 
-        new_encoding_np = np.array(new_encoding, dtype=np.float32)
+        new_vec = self._l2_normalize(new_encoding)
+
+        best_match = None  # (user, cosine_distance)
 
         for user in existing_users:
             if not user.face_encodings:
                 continue
 
-            known_encoding_np = np.array(user.face_encodings, dtype=np.float32)
-
-            # Safety: skip if encoding sizes differ (corrupt / mismatched model)
-            if known_encoding_np.shape != new_encoding_np.shape:
+            # Skip if encoding sizes differ (old corrupted DB entries)
+            if len(user.face_encodings) != len(new_encoding):
                 print(
                     f"⚠️ Skipping user '{user.name}' due to encoding shape mismatch: "
-                    f"{known_encoding_np.shape} vs {new_encoding_np.shape}"
+                    f"({len(user.face_encodings)},) vs ({len(new_encoding)},)"
                 )
                 continue
 
-            distance = np.linalg.norm(new_encoding_np - known_encoding_np)
+            known_vec = self._l2_normalize(user.face_encodings)
+            dist = self._cosine_distance(new_vec, known_vec)
 
-            if distance < VERIFICATION_THRESHOLD:
-                print(f"⚠️ DUPLICATE DETECTED: matches '{user.name}' (distance: {distance:.4f})")
+            if best_match is None or dist < best_match[1]:
+                best_match = (user, dist)
+
+        if best_match:
+            user, dist = best_match
+            print(f"🧪 Best duplicate candidate: '{user.name}' cosine_distance={dist:.4f}")
+
+            if dist < DUPLICATE_COSINE_THRESHOLD:
+                print(f"⚠️ DUPLICATE DETECTED: matches '{user.name}' (cosine_distance: {dist:.4f})")
                 return user
 
         print("✅ Face is unique - no duplicates found")
@@ -265,9 +294,7 @@ class UserService:
         user_data: UserCreate,
         image_data: bytes
     ) -> Union[UserOut, Dict[str, Any], None]:
-        """
-        Enroll a new user with duplicate detection.
-        """
+
         print(f"📸 Extracting face encoding for user: {user_data.name}")
         encoding = await self._extract_encoding(image_data)
 
@@ -312,7 +339,7 @@ class UserService:
 
     async def search_user(self, image_data: bytes) -> Optional[UserOut]:
         """
-        Match the face embedding against all saved users.
+        ✅ FIXED: Recognition using L2-normalized cosine distance.
         """
         target_encoding = await self._extract_encoding(image_data)
         if not target_encoding:
@@ -322,26 +349,27 @@ class UserService:
         if not known_users:
             return None
 
-        target_encoding_np = np.array(target_encoding, dtype=np.float32)
+        target_vec = self._l2_normalize(target_encoding)
 
-        best_match = None  # (user, distance)
+        best_match = None  # (user, cosine_distance)
 
         for user in known_users:
             if not user.face_encodings:
                 continue
 
-            known_encoding_np = np.array(user.face_encodings, dtype=np.float32)
-
-            if known_encoding_np.shape != target_encoding_np.shape:
+            if len(user.face_encodings) != len(target_encoding):
                 continue
 
-            distance = np.linalg.norm(target_encoding_np - known_encoding_np)
-            if distance < VERIFICATION_THRESHOLD:
-                if best_match is None or distance < best_match[1]:
-                    best_match = (user, distance)
+            known_vec = self._l2_normalize(user.face_encodings)
+            dist = self._cosine_distance(target_vec, known_vec)
+
+            if dist < RECOGNITION_COSINE_THRESHOLD:
+                if best_match is None or dist < best_match[1]:
+                    best_match = (user, dist)
 
         if best_match:
             matched_user = best_match[0]
+            print(f"✅ Recognition match: {matched_user.name} (cosine_distance={best_match[1]:.4f})")
             return UserOut(
                 id=str(matched_user.id),
                 name=matched_user.name,
