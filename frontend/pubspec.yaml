@@ -29,6 +29,8 @@ dependencies:
   # WebSocket client for real-time face attendance
   web_socket_channel: ^2.4.0
 
+  #google_mlkit_face_detection: ^0.11.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

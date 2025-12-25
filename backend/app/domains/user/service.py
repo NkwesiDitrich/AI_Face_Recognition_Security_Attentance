@@ -4,10 +4,13 @@
 User Service Layer
 Business logic for user enrollment and face recognition
 
-This service implements the core business logic for:
-- Face encoding extraction using DeepFace
-- User enrollment with duplicate detection
-- Face recognition and user search
+FINAL FIX (works with your DeepFace version):
+- Does NOT use DeepFace.extract_faces (since your package doesn't have it)
+- Uses DeepFace.represent() ONLY
+- Uses FaceNet512 (better separability than your VGG-Face(2622) output)
+- CRITICAL: Enrollment is STRICT (enforce_detection=True ONLY)
+  => prevents garbage embeddings => prevents false duplicates
+- Uses L2-normalized cosine distance for duplicate detection + search
 """
 
 from typing import Optional, List, Union, Dict, Any
@@ -24,151 +27,87 @@ from app.domains.user.models import User
 from app.domains.user.schemas import UserCreate, UserOut
 from app.domains.user.repository import UserRepository
 
-# ------------------------------------------------------------------------------------
-# Thresholds / tuning
-# ------------------------------------------------------------------------------------
 
-# Minimum length to consider something a real embedding vector
-MIN_EMBEDDING_LENGTH = 100
+# ---------------------------
+# Model settings
+# ---------------------------
+MODEL_NAME = "Facenet512"
+MIN_EMBEDDING_LENGTH = 200  # Facenet512 is 512 dims
 
-# ✅ New: Cosine thresholds (you can tune these)
-# Smaller = stricter (harder to match)
-DUPLICATE_COSINE_THRESHOLD = 0.25      # strict: prevents false duplicate registration
-RECOGNITION_COSINE_THRESHOLD = 0.35    # a bit looser: recognition/search match
+# Try multiple detectors (since camera/emulator quality varies)
+DETECTOR_BACKENDS = ["opencv", "retinaface", "mtcnn"]
+ALIGN = True
+
+# ---------------------------
+# Cosine thresholds
+# ---------------------------
+# Lower cosine distance = more similar
+DUPLICATE_COSINE_THRESHOLD = 0.12
+RECOGNITION_COSINE_THRESHOLD = 0.22
 
 
 class UserService:
-    """
-    Service class for user-related business logic.
-
-    Responsibilities:
-    - Extract face encodings from images using DeepFace
-    - Enroll new users with duplicate detection
-    - Search for users by face encoding
-    - Manage face recognition operations
-    """
-
     def __init__(self, user_repo: UserRepository):
         self.user_repo = user_repo
 
     # -----------------------------
-    # Internal helpers
+    # Helpers
     # -----------------------------
     def _is_number(self, x: Any) -> bool:
         return isinstance(x, (int, float, np.number))
 
     def _l2_normalize(self, vec: List[float]) -> np.ndarray:
-        """
-        L2-normalize embedding vector.
-        This makes cosine distance stable and reduces false positives.
-        """
         arr = np.array(vec, dtype=np.float32)
         norm = np.linalg.norm(arr)
-        if norm == 0:
-            return arr
-        return arr / norm
+        return arr if norm == 0 else (arr / norm)
 
     def _cosine_distance(self, a: np.ndarray, b: np.ndarray) -> float:
-        """
-        Cosine distance = 1 - cosine similarity.
-        Lower distance means more similar.
-        """
         return float(1.0 - np.dot(a, b))
 
     def _parse_deepface_embedding(self, represent_output: Any) -> Optional[List[float]]:
         """
-        DeepFace.represent() output varies across versions / forks / wrappers.
+        Parse DeepFace.represent() output across different versions.
 
-        Supported outputs we handle:
-
-        A) List[Dict] like:
-           [
-             {"embedding": [...], "facial_area": {...}, ...}
-           ]
-
-        B) List[float] like:
-           [0.00528, 0.12, ...]   <-- embedding vector directly
-
-        C) List[List[float]] like (rare):
-           [[...embedding...], [...embedding...]]
-
-        D) np.ndarray embedding
+        We support:
+        - List[Dict] where first dict has 'embedding'
+        - List[float] directly
+        - np.ndarray
         """
         if represent_output is None:
             return None
 
-        # If numpy array returned, convert to list
         if isinstance(represent_output, np.ndarray):
             emb = represent_output.flatten().tolist()
             return emb if len(emb) >= MIN_EMBEDDING_LENGTH else None
 
-        # If list returned
         if isinstance(represent_output, list) and len(represent_output) > 0:
             first = represent_output[0]
 
-            # A) List of dicts
-            if isinstance(first, dict):
-                if "embedding" in first:
-                    emb = first["embedding"]
-                    if isinstance(emb, np.ndarray):
-                        emb = emb.flatten().tolist()
-
-                    if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH and all(
-                        self._is_number(v) for v in emb
-                    ):
-                        return [float(v) for v in emb]
-                    return None
-
-                print(f"❌ DeepFace dict returned but no 'embedding' key. Keys: {list(first.keys())}")
+            if isinstance(first, dict) and "embedding" in first:
+                emb = first["embedding"]
+                if isinstance(emb, np.ndarray):
+                    emb = emb.flatten().tolist()
+                if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in emb):
+                    return [float(v) for v in emb]
                 return None
 
-            # B) List[float] => embedding vector directly
+            # Some versions return embedding directly as list[float]
             if self._is_number(first):
-                if all(self._is_number(v) for v in represent_output) and len(represent_output) >= MIN_EMBEDDING_LENGTH:
+                if len(represent_output) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in represent_output):
                     return [float(v) for v in represent_output]
-                print(f"❌ DeepFace returned numeric list but too short (len={len(represent_output)}).")
                 return None
 
-            # C) List[List[float]]
-            if isinstance(first, list):
-                if len(first) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in first):
-                    return [float(v) for v in first]
-                print("❌ DeepFace returned list-of-lists but inner list is not a valid embedding.")
-                return None
-
-            print(f"❌ Unexpected DeepFace output element type: {type(first)}")
-            print(f"❌ First element: {first}")
-            return None
-
-        # If a single dict returned (rare)
-        if isinstance(represent_output, dict) and "embedding" in represent_output:
-            emb = represent_output["embedding"]
-            if isinstance(emb, np.ndarray):
-                emb = emb.flatten().tolist()
-            if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in emb):
-                return [float(v) for v in emb]
-            return None
-
-        # If a single float returned, it is NOT an embedding
-        if self._is_number(represent_output):
-            print(f"❌ DeepFace returned a single number ({represent_output}). Not an embedding.")
-            return None
-
-        print(f"❌ Unhandled DeepFace output type: {type(represent_output)}")
         return None
 
     # -----------------------------
-    # Core: Encoding extraction
+    # STRICT encoding extraction (NO enforce_detection=False fallback!)
     # -----------------------------
     async def _extract_encoding(self, image_data: bytes) -> Optional[List[float]]:
         """
-        Decode image bytes using OpenCV and extract DeepFace embeddings.
-
-        Flow:
-        1) Decode bytes to image
-        2) Save temp file (DeepFace expects path)
-        3) Call DeepFace.represent (try strict detection; fallback to non-strict)
-        4) Parse output robustly (dict embedding OR list-of-floats embedding)
+        STRICT enrollment-grade encoding:
+        - Uses enforce_detection=True ONLY
+        - Tries multiple detector backends
+        - If all detectors fail => return None
         """
         temp_path = None
         try:
@@ -188,39 +127,34 @@ class UserService:
 
             print(f"✅ Image saved to: {temp_path}")
 
-            # First attempt: enforce_detection=True (strict)
-            try:
-                represent_output = await run_in_threadpool(
-                    DeepFace.represent,
-                    img_path=temp_path,
-                    model_name="VGG-Face",
-                    enforce_detection=True,
-                )
-            except Exception as e:
-                print(f"⚠️ DeepFace with enforce_detection=True failed: {e}")
-                print("🔄 Retrying with enforce_detection=False...")
-                represent_output = await run_in_threadpool(
-                    DeepFace.represent,
-                    img_path=temp_path,
-                    model_name="VGG-Face",
-                    enforce_detection=False,
-                )
+            # Try strict detection using several backends
+            last_error = None
+            for backend in DETECTOR_BACKENDS:
+                try:
+                    represent_output = await run_in_threadpool(
+                        DeepFace.represent,
+                        img_path=temp_path,
+                        model_name=MODEL_NAME,
+                        detector_backend=backend,
+                        align=ALIGN,
+                        enforce_detection=True,   # ✅ strict
+                    )
 
-            print("✅ Face detected and encoded successfully (DeepFace returned something).")
-            print(f"📊 DeepFace output type: {type(represent_output).__name__}")
+                    embedding = self._parse_deepface_embedding(represent_output)
+                    if not embedding:
+                        print(f"⚠️ Got output but couldn't parse embedding (backend={backend}).")
+                        continue
 
-            embedding = self._parse_deepface_embedding(represent_output)
-            if not embedding:
-                if isinstance(represent_output, list):
-                    print(f"📊 DeepFace list length: {len(represent_output)}")
-                    if len(represent_output) > 0:
-                        print(f"📊 DeepFace first element type: {type(represent_output[0]).__name__}")
-                        print(f"📊 DeepFace first element sample: {represent_output[0]}")
-                print("❌ Could not parse embedding from DeepFace output.")
-                return None
+                    print(f"✅ Embedding extracted successfully! Length={len(embedding)} (backend={backend})")
+                    return embedding
 
-            print(f"✅ Embedding extracted successfully! Length: {len(embedding)}")
-            return embedding
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ Strict represent failed (backend={backend}): {e}")
+                    continue
+
+            print(f"❌ Face detection failed with all detector backends. Last error: {last_error}")
+            return None
 
         except Exception as e:
             print(f"❌ Error during face encoding: {e}")
@@ -237,20 +171,13 @@ class UserService:
                     print(f"⚠️ Could not delete temp file: {e}")
 
     # -----------------------------
-    # Duplicate detection (FIXED)
+    # Duplicate detection
     # -----------------------------
     async def _check_duplicate_enrollment(self, new_encoding: List[float]) -> Optional[User]:
-        """
-        ✅ FIXED: Duplicate detection using L2-normalized cosine distance.
-
-        Why:
-        - Euclidean distance on raw VGG-Face embeddings can be too permissive (false duplicates).
-        - Cosine distance on normalized embeddings is much more reliable.
-        """
         existing_users = await self.user_repo.get_all_encodings()
 
         if not existing_users:
-            print("✅ No existing users in database - enrollment is unique")
+            print("✅ No existing users - enrollment is unique")
             return None
 
         new_vec = self._l2_normalize(new_encoding)
@@ -261,12 +188,8 @@ class UserService:
             if not user.face_encodings:
                 continue
 
-            # Skip if encoding sizes differ (old corrupted DB entries)
+            # skip users enrolled with different embedding models
             if len(user.face_encodings) != len(new_encoding):
-                print(
-                    f"⚠️ Skipping user '{user.name}' due to encoding shape mismatch: "
-                    f"({len(user.face_encodings)},) vs ({len(new_encoding)},)"
-                )
                 continue
 
             known_vec = self._l2_normalize(user.face_encodings)
@@ -287,7 +210,7 @@ class UserService:
         return None
 
     # -----------------------------
-    # Public API: Enrollment / Search
+    # Enrollment
     # -----------------------------
     async def enroll_user(
         self,
@@ -317,7 +240,6 @@ class UserService:
         print("🖼️ Converting image to Base64...")
         image_base64 = base64.b64encode(image_data).decode("utf-8")
 
-        print("💾 Creating user entity...")
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
@@ -337,10 +259,10 @@ class UserService:
             access_level=saved_user.access_level,
         )
 
+    # -----------------------------
+    # Search / recognition
+    # -----------------------------
     async def search_user(self, image_data: bytes) -> Optional[UserOut]:
-        """
-        ✅ FIXED: Recognition using L2-normalized cosine distance.
-        """
         target_encoding = await self._extract_encoding(image_data)
         if not target_encoding:
             return None
@@ -368,8 +290,8 @@ class UserService:
                     best_match = (user, dist)
 
         if best_match:
-            matched_user = best_match[0]
-            print(f"✅ Recognition match: {matched_user.name} (cosine_distance={best_match[1]:.4f})")
+            matched_user, dist = best_match
+            print(f"✅ Recognition match: {matched_user.name} (cosine_distance={dist:.4f})")
             return UserOut(
                 id=str(matched_user.id),
                 name=matched_user.name,
