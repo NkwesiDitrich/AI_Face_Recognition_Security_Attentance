@@ -4,16 +4,15 @@
 User Service Layer
 Business logic for user enrollment and face recognition
 
-FINAL (based on your Investigation Report):
-- Model: Facenet512 (512-dim embeddings)
-- Distance metric: Cosine distance (with L2 normalization)
-- Thresholds: from your thresholds file (Facenet512 cosine threshold = 0.30)
-- Multi-sample enrollment: create multiple slightly varied samples and average embeddings
-- Strict quality control: blur + brightness checks before embedding
-- Strict face detection: do NOT accept garbage embeddings
+FINAL HYBRID VERSION:
+- Uses ArcFace (best accuracy)
+- Uses simple DeepFace.represent() flow (compatible with your installed version)
+- Robust output parsing (handles list/dict/numpy returns)
+- L2-normalized cosine distance for matching
+- Strict duplicate threshold
 """
 
-from typing import Optional, List, Union, Dict, Any, Tuple
+from typing import Optional, List, Union, Dict, Any
 import numpy as np
 import cv2
 import os
@@ -29,30 +28,17 @@ from app.domains.user.repository import UserRepository
 
 
 # ---------------------------
-# Model / Threshold settings
+# Model settings
 # ---------------------------
-MODEL_NAME = "Facenet512"
+MODEL_NAME = "ArcFace"
+MIN_EMBEDDING_LENGTH = 200  # ArcFace is 512 dims
 
-# From your thresholds file: Facenet512 cosine threshold = 0.30
-# If cosine_distance < 0.30 => considered SAME person.
-DUPLICATE_COSINE_THRESHOLD = 0.30
-
-# Recognition can be a bit looser or same; start same for now
-RECOGNITION_COSINE_THRESHOLD = 0.30
-
-# Detection backends to try (opencv is fastest & most reliable on emulator)
-DETECTOR_BACKENDS = ["opencv", "retinaface", "mtcnn"]
-
-# Minimum embedding length sanity check (Facenet512 should be 512)
-MIN_EMBEDDING_LENGTH = 200
-
-# Multi-sample enrollment count (your report recommends 3–5)
-N_ENROLL_SAMPLES = 3
-
-# Quality control thresholds
-MIN_BRIGHTNESS = 40     # too dark below this
-MAX_BRIGHTNESS = 220    # too bright above this
-MAX_BLUR_LAPLACIAN = 40 # smaller = blurrier (tune if too strict)
+# ---------------------------
+# Thresholds (cosine distance)
+# ---------------------------
+# Lower = more similar
+DUPLICATE_COSINE_THRESHOLD = 0.25      # Strict for duplicates
+RECOGNITION_COSINE_THRESHOLD = 0.35    # Slightly looser for recognition
 
 
 class UserService:
@@ -60,198 +46,135 @@ class UserService:
         self.user_repo = user_repo
 
     # -----------------------------
-    # Utility: metrics
+    # Helpers
     # -----------------------------
+    def _is_number(self, x: Any) -> bool:
+        return isinstance(x, (int, float, np.number))
+
     def _l2_normalize(self, vec: List[float]) -> np.ndarray:
         arr = np.array(vec, dtype=np.float32)
         norm = np.linalg.norm(arr)
-        return arr if norm == 0 else arr / norm
+        return arr if norm == 0 else (arr / norm)
 
     def _cosine_distance(self, a: np.ndarray, b: np.ndarray) -> float:
-        # cosine distance = 1 - cosine similarity
         return float(1.0 - np.dot(a, b))
 
-    # -----------------------------
-    # Utility: quality checks
-    # -----------------------------
-    def _brightness_ok(self, img_bgr: np.ndarray) -> bool:
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        mean_val = float(np.mean(gray))
-        return MIN_BRIGHTNESS <= mean_val <= MAX_BRIGHTNESS
-
-    def _blur_ok(self, img_bgr: np.ndarray) -> bool:
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        lap = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return lap >= MAX_BLUR_LAPLACIAN
-
-    def _quality_ok(self, img_bgr: np.ndarray) -> bool:
-        if not self._brightness_ok(img_bgr):
-            return False
-        if not self._blur_ok(img_bgr):
-            return False
-        return True
-
-    # -----------------------------
-    # Utility: DeepFace output parsing
-    # -----------------------------
-    def _parse_embedding(self, represent_output: Any) -> Optional[List[float]]:
+    def _parse_deepface_embedding(self, represent_output: Any) -> Optional[List[float]]:
         """
-        Supports DeepFace variants:
-        - list[dict] with embedding key
-        - list[float] directly
+        Robust parsing for DeepFace.represent() output.
+        Handles: List[Dict], List[float], np.ndarray
         """
         if represent_output is None:
             return None
 
+        # Case 1: numpy array
         if isinstance(represent_output, np.ndarray):
             emb = represent_output.flatten().tolist()
             return emb if len(emb) >= MIN_EMBEDDING_LENGTH else None
 
+        # Case 2: list
         if isinstance(represent_output, list) and len(represent_output) > 0:
             first = represent_output[0]
 
+            # Subcase 2a: List of dicts (standard)
             if isinstance(first, dict) and "embedding" in first:
                 emb = first["embedding"]
                 if isinstance(emb, np.ndarray):
                     emb = emb.flatten().tolist()
                 if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH:
-                    return [float(x) for x in emb]
+                    return [float(v) for v in emb if self._is_number(v)]
                 return None
 
-            if isinstance(first, (int, float, np.number)):
-                # embedding is directly the list
+            # Subcase 2b: List of floats directly (your version does this)
+            if self._is_number(first):
                 if len(represent_output) >= MIN_EMBEDDING_LENGTH:
-                    return [float(x) for x in represent_output]
+                    return [float(v) for v in represent_output if self._is_number(v)]
                 return None
 
         return None
 
     # -----------------------------
-    # Detection strategy: rotations
+    # Core: Encoding extraction
     # -----------------------------
-    def _rotations(self, img_bgr: np.ndarray) -> List[np.ndarray]:
-        return [
-            img_bgr,
-            cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE),
-            cv2.rotate(img_bgr, cv2.ROTATE_180),
-            cv2.rotate(img_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE),
-        ]
-
-    # -----------------------------
-    # Core embedding extraction (STRICT)
-    # -----------------------------
-    async def _extract_embedding_strict(self, img_bgr: np.ndarray) -> Optional[List[float]]:
+    async def _extract_encoding(self, image_data: bytes) -> Optional[List[float]]:
         """
-        Strict extraction:
-        - Reject poor-quality images (blur/brightness)
-        - Try multiple detectors and rotations with enforce_detection=True
-        - DO NOT fallback to enforce_detection=False for enrollment (prevents garbage embeddings)
+        Extract embedding using DeepFace.represent().
+        Tries strict detection first, falls back to non-strict if needed.
         """
-        if not self._quality_ok(img_bgr):
-            print("❌ Quality check failed (blur/brightness).")
-            return None
-
-        # Save temp file because some DeepFace builds are more stable with file paths
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            temp_path = tmp.name
-
+        temp_path = None
         try:
-            for rotated in self._rotations(img_bgr):
-                cv2.imwrite(temp_path, rotated)
+            nparr = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-                for backend in DETECTOR_BACKENDS:
-                    try:
-                        represent_output = await run_in_threadpool(
-                            DeepFace.represent,
-                            img_path=temp_path,
-                            model_name=MODEL_NAME,
-                            detector_backend=backend,
-                            enforce_detection=True,  # strict
-                            align=True,
-                        )
-                        emb = self._parse_embedding(represent_output)
-                        if emb and len(emb) >= MIN_EMBEDDING_LENGTH:
-                            return emb
-                    except Exception as e:
-                        # Try next backend/rotation
-                        continue
+            if img is None:
+                print("❌ OpenCV failed to decode image.")
+                return None
 
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+                temp_path = tmp_file.name
+
+            if not cv2.imwrite(temp_path, img):
+                print(f"❌ Failed to write image to {temp_path}")
+                return None
+
+            print(f"✅ Image saved to: {temp_path}")
+
+            # Try strict detection first
+            try:
+                represent_output = await run_in_threadpool(
+                    DeepFace.represent,
+                    img_path=temp_path,
+                    model_name=MODEL_NAME,
+                    enforce_detection=True,
+                )
+            except Exception as e:
+                print(f"⚠️ Strict detection failed: {e}")
+                print("🔄 Retrying with enforce_detection=False...")
+                represent_output = await run_in_threadpool(
+                    DeepFace.represent,
+                    img_path=temp_path,
+                    model_name=MODEL_NAME,
+                    enforce_detection=False,
+                )
+
+            embedding = self._parse_deepface_embedding(represent_output)
+            if not embedding:
+                print("❌ Could not parse embedding from DeepFace output.")
+                return None
+
+            print(f"✅ Embedding extracted successfully! Length={len(embedding)}")
+            return embedding
+
+        except Exception as e:
+            print(f"❌ Error during face encoding: {e}")
             return None
 
         finally:
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-
-    # -----------------------------
-    # Multi-sample enrollment averaging
-    # -----------------------------
-    def _augment_samples(self, img_bgr: np.ndarray) -> List[np.ndarray]:
-        """
-        Creates N slightly varied samples (brightness/contrast changes)
-        to simulate multi-sample enrollment without changing Flutter.
-        This stabilizes the final embedding as your report recommends.
-        """
-        samples = [img_bgr]
-
-        # Slight brighten
-        bright = cv2.convertScaleAbs(img_bgr, alpha=1.05, beta=10)
-        samples.append(bright)
-
-        # Slight darken
-        dark = cv2.convertScaleAbs(img_bgr, alpha=1.05, beta=-10)
-        samples.append(dark)
-
-        return samples[:N_ENROLL_SAMPLES]
-
-    async def _extract_master_embedding(self, image_data: bytes) -> Optional[List[float]]:
-        """
-        Implements report formula:
-        E_master = (1/N) * sum(E_i)
-        Then L2-normalize the result.
-        """
-        nparr = np.frombuffer(image_data, np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img_bgr is None:
-            print("❌ OpenCV failed to decode image.")
-            return None
-
-        embeddings: List[np.ndarray] = []
-
-        for sample in self._augment_samples(img_bgr):
-            emb = await self._extract_embedding_strict(sample)
-            if emb:
-                embeddings.append(self._l2_normalize(emb))
-
-        if len(embeddings) < 2:
-            print("❌ Not enough valid samples to build a stable master embedding.")
-            return None
-
-        # Average embeddings
-        avg = np.mean(np.stack(embeddings, axis=0), axis=0)
-
-        # Normalize again
-        avg_norm = avg / (np.linalg.norm(avg) + 1e-8)
-
-        return avg_norm.astype(np.float32).tolist()
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as e:
+                    print(f"⚠️ Could not delete temp file: {e}")
 
     # -----------------------------
     # Duplicate detection
     # -----------------------------
     async def _check_duplicate_enrollment(self, new_encoding: List[float]) -> Optional[User]:
         existing_users = await self.user_repo.get_all_encodings()
+
         if not existing_users:
+            print("✅ No existing users - enrollment is unique")
             return None
 
         new_vec = self._l2_normalize(new_encoding)
 
         best_match = None  # (user, dist)
+
         for user in existing_users:
             if not user.face_encodings:
                 continue
 
+            # Skip mismatched embedding lengths
             if len(user.face_encodings) != len(new_encoding):
                 continue
 
@@ -269,6 +192,7 @@ class UserService:
                 print(f"⚠️ DUPLICATE DETECTED: matches '{user.name}' (cosine_distance={dist:.4f})")
                 return user
 
+        print("✅ Face is unique - no duplicates found")
         return None
 
     # -----------------------------
@@ -280,8 +204,8 @@ class UserService:
         image_data: bytes
     ) -> Union[UserOut, Dict[str, Any], None]:
 
-        print(f"📸 Extracting master embedding for user: {user_data.name}")
-        encoding = await self._extract_master_embedding(image_data)
+        print(f"📸 Extracting face encoding for user: {user_data.name}")
+        encoding = await self._extract_encoding(image_data)
 
         if not encoding:
             print(f"❌ Face detection/encoding failed for {user_data.name}")
@@ -289,7 +213,6 @@ class UserService:
 
         print("🔍 Checking for duplicate enrollment...")
         duplicate_user = await self._check_duplicate_enrollment(encoding)
-
         if duplicate_user:
             return {
                 "error": "duplicate",
@@ -299,8 +222,10 @@ class UserService:
                 "existing_employee_id": duplicate_user.employee_id,
             }
 
+        print("🖼️ Converting image to Base64...")
         image_base64 = base64.b64encode(image_data).decode("utf-8")
 
+        print("💾 Creating user entity...")
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
@@ -309,8 +234,10 @@ class UserService:
             image_base64=image_base64,
         )
 
+        print("📤 Saving user to database...")
         saved_user = await self.user_repo.add_user(new_user)
 
+        print(f"✅ User {user_data.name} enrolled successfully!")
         return UserOut(
             id=str(saved_user.id),
             name=saved_user.name,
@@ -322,22 +249,22 @@ class UserService:
     # Search / recognition
     # -----------------------------
     async def search_user(self, image_data: bytes) -> Optional[UserOut]:
-        encoding = await self._extract_master_embedding(image_data)
-        if not encoding:
+        target_encoding = await self._extract_encoding(image_data)
+        if not target_encoding:
             return None
 
         known_users = await self.user_repo.get_all_encodings()
         if not known_users:
             return None
 
-        target_vec = self._l2_normalize(encoding)
+        target_vec = self._l2_normalize(target_encoding)
 
         best_match = None
         for user in known_users:
             if not user.face_encodings:
                 continue
 
-            if len(user.face_encodings) != len(encoding):
+            if len(user.face_encodings) != len(target_encoding):
                 continue
 
             known_vec = self._l2_normalize(user.face_encodings)
@@ -349,6 +276,7 @@ class UserService:
 
         if best_match:
             matched_user, dist = best_match
+            print(f"✅ Recognition match: {matched_user.name} (cosine_distance={dist:.4f})")
             return UserOut(
                 id=str(matched_user.id),
                 name=matched_user.name,
