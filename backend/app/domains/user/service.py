@@ -30,7 +30,7 @@ from app.domains.user.repository import UserRepository
 # Model settings
 # ---------------------------
 MODEL_NAME = "ArcFace"
-MIN_EMBEDDING_LENGTH = 512  # ArcFace is 512 dims
+MIN_EMBEDDING_LENGTH = 512  # ArcFace uses 512-dimensional vectors
 
 # Try multiple detectors (since camera/emulator quality varies)
 # Added 'mediapipe' as it's often more robust for mobile captures
@@ -41,9 +41,9 @@ ALIGN = True
 # Cosine thresholds for ArcFace
 # ---------------------------
 # Lower cosine distance = more similar
-# Based on DeepFace recommendations for ArcFace
-DUPLICATE_COSINE_THRESHOLD = 0.68
-RECOGNITION_COSINE_THRESHOLD = 0.68
+# 0.40 is the recommended threshold for ArcFace with Cosine distance
+DUPLICATE_COSINE_THRESHOLD = 0.40
+RECOGNITION_COSINE_THRESHOLD = 0.40
 
 
 class UserService:
