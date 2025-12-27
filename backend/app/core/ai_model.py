@@ -7,7 +7,7 @@ from typing import Any, Dict
 ai_model: Dict[str, Any] = {}
 
 
-def load_ai_models(): # <-- NOTE: This is a synchronous function (no 'async')
+def load_ai_models():
     """Loads the necessary AI models into memory (DeepFace, Liveness, etc.)."""
     global ai_model
     print("Loading AI Models...")
@@ -18,14 +18,12 @@ def load_ai_models(): # <-- NOTE: This is a synchronous function (no 'async')
         ai_model["emotion_model"] = DeepFace.build_model('Emotion')
         print("DeepFace Emotion model loaded.")
 
-        # Pre-load the 'VGG-Face' model used for recognition
-        print("Pre-loading DeepFace VGG-Face model...")
-        ai_model["recognition_model"] = DeepFace.build_model('VGG-Face')
-        ai_model["recognition_model_name"] = "VGG-Face"
-        print("DeepFace VGG-Face model loaded.")
-
-        # Placeholder for liveness model
-        # ai_model["liveness"] = load_tensorflow_model("liveness_model.h5")
+        # Pre-load the 'ArcFace' model used for recognition
+        # ArcFace is more robust than VGG-Face for security systems
+        print("Pre-loading DeepFace ArcFace model...")
+        ai_model["recognition_model"] = DeepFace.build_model('ArcFace')
+        ai_model["recognition_model_name"] = "ArcFace"
+        print("DeepFace ArcFace model loaded.")
 
         print("All DeepFace models configured successfully.")
 

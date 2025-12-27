@@ -1,10 +1,21 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:image/image.dart' as img;
 
 class UserService {
-  static const String baseUrl = 'http://10.0.2.2:8000/api/v1';
+  /// ==========================================================================
+  /// 🌐 NETWORK CONFIGURATION FOR REAL DEVICES
+  /// ==========================================================================
+  ///
+  /// 1. EMULATOR: Use 'http://10.0.2.2:8000/api/v1'
+  /// 2. REAL DEVICE: Use your computer's Local IP (e.g., 'http://192.168.1.5:8000/api/v1')
+  ///
+  /// IMPORTANT: Your phone and computer MUST be on the same Wi-Fi network.
+  /// ==========================================================================
+
+  // CHANGE THIS to your computer's IP address when testing on a real phone!
+  static const String _serverIp = '192.168.100.58'; // Default for emulator
+  static const String baseUrl = 'http://$_serverIp:8000/api/v1';
 
   /// ------------------------------
   /// ENROLL USER
@@ -16,24 +27,7 @@ class UserService {
     required File imageFile,
   }) async {
     try {
-      // 🔥 FIX: Rotate image if needed (camera orientation issue)
-      print("📸 Processing image for enrollment...");
-
-      var imageBytes = await imageFile.readAsBytes();
-      var image = img.decodeImage(imageBytes);
-
-      if (image != null) {
-        // Rotate 90 degrees if needed (common on Android)
-        image = img.copyRotate(image, angle: 90);
-
-        // Save the corrected image with high quality
-        var correctedImageBytes = img.encodeJpg(image, quality: 95);
-        await imageFile.writeAsBytes(correctedImageBytes);
-
-        print("✅ Image rotated and optimized for face detection");
-      } else {
-        print("⚠️ Could not decode image, proceeding with original");
-      }
+      print("📸 Preparing enrollment request for $name...");
 
       var request = http.MultipartRequest(
         'POST',
@@ -50,13 +44,13 @@ class UserService {
         await http.MultipartFile.fromPath('file', imageFile.path),
       );
 
-      print("📤 Sending enrollment request to backend...");
+      print("📤 Sending enrollment request to $baseUrl/enroll...");
 
-      // Add timeout
       var streamedResponse = await request.send().timeout(
-        const Duration(seconds: 90),
+        const Duration(seconds: 60),
         onTimeout: () {
-          throw Exception("Request timed out while enrolling user.");
+          throw Exception(
+              "Request timed out. Check if your server is running and accessible at $baseUrl");
         },
       );
 
@@ -66,14 +60,25 @@ class UserService {
       print("📥 Backend response: ${response.statusCode}");
 
       if (response.statusCode == 201) {
-        print("✅ Enrollment successful!");
         return {
           'success': true,
           'message': 'User enrolled successfully',
           'data': jsonDecode(responseBody),
         };
+      } else if (response.statusCode == 409) {
+        return {
+          'success': false,
+          'message': 'Duplicate: This face is already registered.',
+          'data': jsonDecode(responseBody),
+        };
+      } else if (response.statusCode == 400) {
+        return {
+          'success': false,
+          'message':
+              'Face not detected. Please try again with a clearer photo.',
+          'data': jsonDecode(responseBody),
+        };
       } else {
-        print("❌ Enrollment failed: ${response.statusCode}");
         return {
           'success': false,
           'message': 'Enrollment failed: ${response.statusCode}',
@@ -84,7 +89,8 @@ class UserService {
       print("❌ Enrollment error: $e");
       return {
         'success': false,
-        'message': 'Error: $e',
+        'message':
+            'Network Error: $e. Ensure your phone and PC are on the same Wi-Fi.',
         'data': null,
       };
     }
@@ -97,24 +103,7 @@ class UserService {
     required File imageFile,
   }) async {
     try {
-      // 🔥 FIX: Rotate image if needed (camera orientation issue)
-      print("📸 Processing image for search...");
-
-      var imageBytes = await imageFile.readAsBytes();
-      var image = img.decodeImage(imageBytes);
-
-      if (image != null) {
-        // Rotate 90 degrees if needed (common on Android)
-        image = img.copyRotate(image, angle: 90);
-
-        // Save the corrected image with high quality
-        var correctedImageBytes = img.encodeJpg(image, quality: 95);
-        await imageFile.writeAsBytes(correctedImageBytes);
-
-        print("✅ Image rotated and optimized for face detection");
-      } else {
-        print("⚠️ Could not decode image, proceeding with original");
-      }
+      print("📸 Preparing search request...");
 
       var request = http.MultipartRequest(
         'POST',
@@ -127,13 +116,13 @@ class UserService {
         await http.MultipartFile.fromPath('file', imageFile.path),
       );
 
-      print("📤 Sending search request to backend...");
+      print("📤 Sending search request to $baseUrl/search...");
 
-      // Add timeout
       var streamedResponse = await request.send().timeout(
-        const Duration(seconds: 90),
+        const Duration(seconds: 60),
         onTimeout: () {
-          throw Exception("Request timed out while searching user.");
+          throw Exception(
+              "Request timed out. Check if your server is running and accessible at $baseUrl");
         },
       );
 
@@ -143,21 +132,18 @@ class UserService {
       print("📥 Backend response: ${response.statusCode}");
 
       if (response.statusCode == 200) {
-        print("✅ User found!");
         return {
           'success': true,
           'message': 'User found',
           'data': jsonDecode(responseBody),
         };
       } else if (response.statusCode == 404) {
-        print("❌ No matching user found");
         return {
           'success': false,
           'message': 'No matching user found',
           'data': null,
         };
       } else {
-        print("❌ Search failed: ${response.statusCode}");
         return {
           'success': false,
           'message': 'Search failed: ${response.statusCode}',
@@ -168,7 +154,8 @@ class UserService {
       print("❌ Search error: $e");
       return {
         'success': false,
-        'message': 'Error: $e',
+        'message':
+            'Network Error: $e. Ensure your phone and PC are on the same Wi-Fi.',
         'data': null,
       };
     }

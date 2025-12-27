@@ -4,12 +4,11 @@
 User Service Layer
 Business logic for user enrollment and face recognition
 
-FINAL HYBRID VERSION:
-- Uses ArcFace (best accuracy)
-- Uses simple DeepFace.represent() flow (compatible with your installed version)
-- Robust output parsing (handles list/dict/numpy returns)
-- L2-normalized cosine distance for matching
-- Strict duplicate threshold
+Improvements:
+- Uses ArcFace (State-of-the-art accuracy)
+- Improved face detection logic with fallback to enforce_detection=False for problematic images
+- Proper Cosine thresholds for ArcFace
+- L2-normalized cosine distance for duplicate detection + search
 """
 
 from typing import Optional, List, Union, Dict, Any
@@ -31,14 +30,20 @@ from app.domains.user.repository import UserRepository
 # Model settings
 # ---------------------------
 MODEL_NAME = "ArcFace"
-MIN_EMBEDDING_LENGTH = 200  # ArcFace is 512 dims
+MIN_EMBEDDING_LENGTH = 512  # ArcFace is 512 dims
+
+# Try multiple detectors (since camera/emulator quality varies)
+# Added 'mediapipe' as it's often more robust for mobile captures
+DETECTOR_BACKENDS = ["retinaface", "mtcnn", "opencv", "mediapipe"]
+ALIGN = True
 
 # ---------------------------
-# Thresholds (cosine distance)
+# Cosine thresholds for ArcFace
 # ---------------------------
-# Lower = more similar
-DUPLICATE_COSINE_THRESHOLD = 0.25      # Strict for duplicates
-RECOGNITION_COSINE_THRESHOLD = 0.35    # Slightly looser for recognition
+# Lower cosine distance = more similar
+# Based on DeepFace recommendations for ArcFace
+DUPLICATE_COSINE_THRESHOLD = 0.68
+RECOGNITION_COSINE_THRESHOLD = 0.68
 
 
 class UserService:
@@ -57,49 +62,46 @@ class UserService:
         return arr if norm == 0 else (arr / norm)
 
     def _cosine_distance(self, a: np.ndarray, b: np.ndarray) -> float:
+        # DeepFace's internal cosine distance is 1 - cosine_similarity
+        # cosine_similarity = (a . b) / (||a|| * ||b||)
+        # Since we L2 normalize, ||a|| = ||b|| = 1, so similarity = a . b
         return float(1.0 - np.dot(a, b))
 
     def _parse_deepface_embedding(self, represent_output: Any) -> Optional[List[float]]:
         """
-        Robust parsing for DeepFace.represent() output.
-        Handles: List[Dict], List[float], np.ndarray
+        Parse DeepFace.represent() output across different versions.
         """
         if represent_output is None:
             return None
 
-        # Case 1: numpy array
         if isinstance(represent_output, np.ndarray):
             emb = represent_output.flatten().tolist()
             return emb if len(emb) >= MIN_EMBEDDING_LENGTH else None
 
-        # Case 2: list
         if isinstance(represent_output, list) and len(represent_output) > 0:
             first = represent_output[0]
 
-            # Subcase 2a: List of dicts (standard)
             if isinstance(first, dict) and "embedding" in first:
                 emb = first["embedding"]
                 if isinstance(emb, np.ndarray):
                     emb = emb.flatten().tolist()
-                if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH:
-                    return [float(v) for v in emb if self._is_number(v)]
+                if isinstance(emb, list) and len(emb) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in emb):
+                    return [float(v) for v in emb]
                 return None
 
-            # Subcase 2b: List of floats directly (your version does this)
             if self._is_number(first):
-                if len(represent_output) >= MIN_EMBEDDING_LENGTH:
-                    return [float(v) for v in represent_output if self._is_number(v)]
+                if len(represent_output) >= MIN_EMBEDDING_LENGTH and all(self._is_number(v) for v in represent_output):
+                    return [float(v) for v in represent_output]
                 return None
 
         return None
 
     # -----------------------------
-    # Core: Encoding extraction
+    # Improved encoding extraction
     # -----------------------------
-    async def _extract_encoding(self, image_data: bytes) -> Optional[List[float]]:
+    async def _extract_encoding(self, image_data: bytes, is_enrollment: bool = False) -> Optional[List[float]]:
         """
-        Extract embedding using DeepFace.represent().
-        Tries strict detection first, falls back to non-strict if needed.
+        Extract face encoding with robust detection logic.
         """
         temp_path = None
         try:
@@ -120,30 +122,46 @@ class UserService:
             print(f"✅ Image saved to: {temp_path}")
 
             # Try strict detection first
-            try:
-                represent_output = await run_in_threadpool(
-                    DeepFace.represent,
-                    img_path=temp_path,
-                    model_name=MODEL_NAME,
-                    enforce_detection=True,
-                )
-            except Exception as e:
-                print(f"⚠️ Strict detection failed: {e}")
-                print("🔄 Retrying with enforce_detection=False...")
-                represent_output = await run_in_threadpool(
-                    DeepFace.represent,
-                    img_path=temp_path,
-                    model_name=MODEL_NAME,
-                    enforce_detection=False,
-                )
+            for backend in DETECTOR_BACKENDS:
+                try:
+                    represent_output = await run_in_threadpool(
+                        DeepFace.represent,
+                        img_path=temp_path,
+                        model_name=MODEL_NAME,
+                        detector_backend=backend,
+                        align=ALIGN,
+                        enforce_detection=True,
+                    )
 
-            embedding = self._parse_deepface_embedding(represent_output)
-            if not embedding:
-                print("❌ Could not parse embedding from DeepFace output.")
-                return None
+                    embedding = self._parse_deepface_embedding(represent_output)
+                    if embedding:
+                        print(f"✅ Embedding extracted successfully! (backend={backend})")
+                        return embedding
+                except Exception as e:
+                    print(f"⚠️ Strict detection failed (backend={backend}): {e}")
+                    continue
 
-            print(f"✅ Embedding extracted successfully! Length={len(embedding)}")
-            return embedding
+            # If enrollment and strict failed, we might want to reject
+            # But for search/attendance, we can try a more relaxed approach
+            if not is_enrollment:
+                print("🔄 Strict detection failed, trying relaxed detection for search...")
+                try:
+                    represent_output = await run_in_threadpool(
+                        DeepFace.represent,
+                        img_path=temp_path,
+                        model_name=MODEL_NAME,
+                        detector_backend="opencv", # Fast fallback
+                        align=ALIGN,
+                        enforce_detection=False,
+                    )
+                    embedding = self._parse_deepface_embedding(represent_output)
+                    if embedding:
+                        print("✅ Embedding extracted with relaxed detection.")
+                        return embedding
+                except Exception as e:
+                    print(f"❌ Relaxed detection also failed: {e}")
+
+            return None
 
         except Exception as e:
             print(f"❌ Error during face encoding: {e}")
@@ -153,8 +171,8 @@ class UserService:
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
-                except Exception as e:
-                    print(f"⚠️ Could not delete temp file: {e}")
+                except:
+                    pass
 
     # -----------------------------
     # Duplicate detection
@@ -163,19 +181,13 @@ class UserService:
         existing_users = await self.user_repo.get_all_encodings()
 
         if not existing_users:
-            print("✅ No existing users - enrollment is unique")
             return None
 
         new_vec = self._l2_normalize(new_encoding)
-
-        best_match = None  # (user, dist)
+        best_match = None
 
         for user in existing_users:
-            if not user.face_encodings:
-                continue
-
-            # Skip mismatched embedding lengths
-            if len(user.face_encodings) != len(new_encoding):
+            if not user.face_encodings or len(user.face_encodings) != len(new_encoding):
                 continue
 
             known_vec = self._l2_normalize(user.face_encodings)
@@ -186,13 +198,10 @@ class UserService:
 
         if best_match:
             user, dist = best_match
-            print(f"🧪 Best duplicate candidate: '{user.name}' cosine_distance={dist:.4f}")
-
+            print(f"🧪 Best duplicate candidate: '{user.name}' distance={dist:.4f}")
             if dist < DUPLICATE_COSINE_THRESHOLD:
-                print(f"⚠️ DUPLICATE DETECTED: matches '{user.name}' (cosine_distance={dist:.4f})")
                 return user
 
-        print("✅ Face is unique - no duplicates found")
         return None
 
     # -----------------------------
@@ -205,7 +214,7 @@ class UserService:
     ) -> Union[UserOut, Dict[str, Any], None]:
 
         print(f"📸 Extracting face encoding for user: {user_data.name}")
-        encoding = await self._extract_encoding(image_data)
+        encoding = await self._extract_encoding(image_data, is_enrollment=True)
 
         if not encoding:
             print(f"❌ Face detection/encoding failed for {user_data.name}")
@@ -214,6 +223,7 @@ class UserService:
         print("🔍 Checking for duplicate enrollment...")
         duplicate_user = await self._check_duplicate_enrollment(encoding)
         if duplicate_user:
+            print(f"❌ Enrollment rejected: Duplicate face detected (matches {duplicate_user.name})")
             return {
                 "error": "duplicate",
                 "message": f"Face already registered as {duplicate_user.name}",
@@ -222,10 +232,8 @@ class UserService:
                 "existing_employee_id": duplicate_user.employee_id,
             }
 
-        print("🖼️ Converting image to Base64...")
         image_base64 = base64.b64encode(image_data).decode("utf-8")
 
-        print("💾 Creating user entity...")
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
@@ -234,10 +242,7 @@ class UserService:
             image_base64=image_base64,
         )
 
-        print("📤 Saving user to database...")
         saved_user = await self.user_repo.add_user(new_user)
-
-        print(f"✅ User {user_data.name} enrolled successfully!")
         return UserOut(
             id=str(saved_user.id),
             name=saved_user.name,
@@ -249,7 +254,7 @@ class UserService:
     # Search / recognition
     # -----------------------------
     async def search_user(self, image_data: bytes) -> Optional[UserOut]:
-        target_encoding = await self._extract_encoding(image_data)
+        target_encoding = await self._extract_encoding(image_data, is_enrollment=False)
         if not target_encoding:
             return None
 
@@ -258,13 +263,10 @@ class UserService:
             return None
 
         target_vec = self._l2_normalize(target_encoding)
-
         best_match = None
-        for user in known_users:
-            if not user.face_encodings:
-                continue
 
-            if len(user.face_encodings) != len(target_encoding):
+        for user in known_users:
+            if not user.face_encodings or len(user.face_encodings) != len(target_encoding):
                 continue
 
             known_vec = self._l2_normalize(user.face_encodings)
@@ -276,7 +278,7 @@ class UserService:
 
         if best_match:
             matched_user, dist = best_match
-            print(f"✅ Recognition match: {matched_user.name} (cosine_distance={dist:.4f})")
+            print(f"✅ Recognition match: {matched_user.name} (distance={dist:.4f})")
             return UserOut(
                 id=str(matched_user.id),
                 name=matched_user.name,
