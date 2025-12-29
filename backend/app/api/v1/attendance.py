@@ -1,29 +1,23 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+# backend/app/api/v1/attendance.py
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Body
 from app.domains.attendance.service import AttendanceService
 from app.dependencies import get_attendance_service
 
 router = APIRouter()
 
 @router.websocket("/ws/attendance")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    attendance_service: AttendanceService = Depends(get_attendance_service)
-):
+async def websocket_endpoint(websocket: WebSocket, service: AttendanceService = Depends(get_attendance_service)):
     await websocket.accept()
-    print("WebSocket connection established for attendance.")
-
+    print("DEBUG: WebSocket Connected")
     try:
         while True:
-            # Receive image bytes from Flutter
             image_data = await websocket.receive_bytes()
-
-            # Process the frame
-            log_entry = await attendance_service.process_attendance_frame(image_data)
-
-            # Send result back
-            await websocket.send_json(log_entry)
-
+            result = await service.process_attendance_frame(image_data)
+            print(f"DEBUG: Result -> {result['status']}")
+            await websocket.send_json(result)
     except WebSocketDisconnect:
-        print("Attendance WebSocket disconnected.")
-    except Exception as e:
-        print(f"WebSocket Error: {e}")
+        print("DEBUG: WebSocket Disconnected")
+
+@router.post("/record")
+async def record_attendance(user_id: str = Body(..., embed=True), service: AttendanceService = Depends(get_attendance_service)):
+    return await service.record_attendance(user_id)

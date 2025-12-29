@@ -14,7 +14,7 @@ class UserService {
   /// ==========================================================================
 
   // CHANGE THIS to your computer's IP address when testing on a real phone!
-  static const String _serverIp = '192.168.177.202'; // Default for emulator
+  static const String _serverIp = '192.168.181.202'; // Default for emulator
   static const String baseUrl = 'http://$_serverIp:8000/api/v1';
 
   /// ------------------------------
