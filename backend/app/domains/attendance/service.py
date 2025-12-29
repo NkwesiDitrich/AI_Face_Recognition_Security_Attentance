@@ -177,4 +177,3 @@ class AttendanceService:
         log = AttendanceLog(user_id=user_id, status="present")
         result = await self.attendance_repo.add_log(log)
         return {"status": "success", "message": "Attendance recorded", "log_id": str(result.id)}
-
