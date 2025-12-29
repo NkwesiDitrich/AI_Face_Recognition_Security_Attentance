@@ -5,7 +5,6 @@ import 'package:camera/camera.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:ai_face_attendance_frontend/utils/image_converter.dart';
 
 enum AttendancePhase {
@@ -37,7 +36,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _isConnected = false;
   Map<String, dynamic>? _faceCoords;
 
-  static const String _wsUrl = 'ws://localhost:8000/api/v1/ws/attendance';
+  // CHANGE THIS to your computer's IP address when testing on a real phone!
+  static const String _serverIp = '127.0.0.1'; // Use 'localhost' or your PC IP
+  static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
   void initState() {
@@ -56,11 +57,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _initializeCamera() {
+    final frontCamera = widget.cameras.firstWhere(
+      (c) => c.lensDirection == CameraLensDirection.front,
+      orElse: () => widget.cameras.first,
+    );
+
     _controller = CameraController(
-        widget.cameras
-            .firstWhere((c) => c.lensDirection == CameraLensDirection.front),
-        ResolutionPreset.medium,
-        enableAudio: false);
+      frontCamera,
+      ResolutionPreset.high, // Increased resolution for better detection
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+    );
+
     _initializeControllerFuture = _controller.initialize().then((_) {
       if (mounted) _startFrameStream();
     });
@@ -68,36 +76,61 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     try {
+      print("🔗 Connecting to WebSocket: $_wsUrl");
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
       setState(() => _isConnected = true);
-      _channel!.stream.listen((data) {
-        if (_currentPhase != AttendancePhase.faceRecognition ||
-            _isFaceRecognized) return;
-        final response = jsonDecode(data);
-        if (mounted) {
-          setState(() {
-            _statusMessage = response['message'] ?? "Processing...";
-            _isFaceDetected = response['face_detected'] ?? false;
-            _faceCoords = response['coords'];
-            if (response['status'] == 'success') {
-              _isFaceRecognized = true;
-              _recognizedUserName = response['user'];
-              _handleFaceRecognized();
-            }
-          });
-        }
-      },
-          onDone: () => setState(() => _isConnected = false),
-          onError: (_) => setState(() => _isConnected = false));
+
+      _channel!.stream.listen(
+        (data) {
+          if (_currentPhase != AttendancePhase.faceRecognition ||
+              _isFaceRecognized) return;
+
+          final response = jsonDecode(data);
+          if (mounted) {
+            setState(() {
+              _isFaceDetected = response['face_detected'] ?? false;
+              _faceCoords = response['coords'];
+
+              if (response['status'] == 'success') {
+                _isFaceRecognized = true;
+                _recognizedUserName = response['user'];
+                _statusMessage = "✔ Face recognized";
+                _handleFaceRecognized();
+              } else {
+                _statusMessage = response['message'] ?? "Processing...";
+              }
+            });
+          }
+        },
+        onDone: () {
+          print("🔌 WebSocket disconnected");
+          if (mounted) setState(() => _isConnected = false);
+        },
+        onError: (error) {
+          print("❌ WebSocket error: $error");
+          if (mounted) setState(() => _isConnected = false);
+        },
+      );
     } catch (e) {
+      print("❌ WebSocket connection failed: $e");
       setState(() => _isConnected = false);
     }
   }
 
   void _handleFaceRecognized() {
     Timer(const Duration(milliseconds: 1000), () {
-      if (mounted)
+      if (mounted) {
         setState(() => _currentPhase = AttendancePhase.livenessTransition);
+        _startTransitionPhase();
+      }
+    });
+  }
+
+  void _startTransitionPhase() {
+    Timer(const Duration(seconds: 1), () {
+      if (mounted) {
+        setState(() => _currentPhase = AttendancePhase.livenessDetection);
+      }
     });
   }
 
@@ -105,10 +138,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _controller.startImageStream((image) {
       if (_currentPhase != AttendancePhase.faceRecognition || _isFaceRecognized)
         return;
+
+      // Stream every 400ms for a good balance of speed and detection
       if (_streamTimer == null || !_streamTimer!.isActive) {
-        _streamTimer = Timer(const Duration(milliseconds: 500), () {
+        _streamTimer = Timer(const Duration(milliseconds: 400), () {
           final bytes = convertYUV420toImage(image);
-          if (bytes != null && _isConnected) _channel?.sink.add(bytes);
+          if (bytes != null && _isConnected) {
+            _channel?.sink.add(bytes);
+          }
           _streamTimer = null;
         });
       }
@@ -119,32 +156,55 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 500),
-          child: _buildCurrentUI()),
+        duration: const Duration(milliseconds: 500),
+        child: _buildCurrentUI(),
+      ),
     );
   }
 
   Widget _buildCurrentUI() {
-    if (_currentPhase == AttendancePhase.preparation) return _buildPrepUI();
-    if (_currentPhase == AttendancePhase.livenessTransition)
-      return _buildTransitionUI();
-    return _buildRecognitionUI();
+    switch (_currentPhase) {
+      case AttendancePhase.preparation:
+        return _buildPrepUI();
+      case AttendancePhase.livenessTransition:
+        return _buildTransitionUI();
+      case AttendancePhase.livenessDetection:
+        return _buildLivenessUI();
+      case AttendancePhase.faceRecognition:
+      default:
+        return _buildRecognitionUI();
+    }
   }
 
   Widget _buildPrepUI() {
     return Container(
-        color: Colors.blueAccent,
-        child: const Center(
-            child: Text("Step 1: Face Recognition",
-                style: TextStyle(color: Colors.white, fontSize: 24))));
+      key: const ValueKey("prep"),
+      color: Colors.blueAccent,
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text("Step 1 of 2",
+                style: TextStyle(color: Colors.white70, fontSize: 18)),
+            SizedBox(height: 10),
+            Text("Face Recognition",
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildRecognitionUI() {
     return FutureBuilder(
       future: _initializeControllerFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done)
+        if (snapshot.connectionState != ConnectionState.done) {
           return const Center(child: CircularProgressIndicator());
+        }
         return Stack(
           children: [
             SizedBox.expand(child: CameraPreview(_controller)),
@@ -157,35 +217,66 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 width: _faceCoords!['w'] * MediaQuery.of(context).size.width,
                 height: _faceCoords!['h'] * MediaQuery.of(context).size.height,
                 child: Container(
-                    decoration: BoxDecoration(
-                        border: Border.all(color: Colors.green, width: 3),
-                        borderRadius: BorderRadius.circular(8))),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.green, width: 3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
               ),
 
             Positioned(
-                top: 40,
-                right: 20,
-                child: CircleAvatar(
-                    backgroundColor: _isConnected ? Colors.green : Colors.red,
-                    radius: 8)),
+              top: 40,
+              right: 20,
+              child: CircleAvatar(
+                backgroundColor: _isConnected ? Colors.green : Colors.red,
+                radius: 8,
+              ),
+            ),
+
             if (_isFaceRecognized)
               Center(
-                  child: Container(
-                      padding: const EdgeInsets.all(20),
-                      color: Colors.green.withOpacity(0.8),
-                      child: Text("Welcome, $_recognizedUserName",
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 20)))),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.check_circle,
+                          color: Colors.white, size: 60),
+                      const SizedBox(height: 10),
+                      Text(
+                        "Welcome, $_recognizedUserName",
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
             Positioned(
-                bottom: 40,
-                left: 20,
-                right: 20,
-                child: Text(_statusMessage,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        backgroundColor: Colors.black54))),
+              bottom: 60,
+              left: 30,
+              right: 30,
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(25),
+                ),
+                child: Text(
+                  _statusMessage,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ),
+            ),
           ],
         );
       },
@@ -194,14 +285,43 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildTransitionUI() {
     return Container(
-        color: Colors.deepPurpleAccent,
-        child: const Center(
-            child: Text("Step 2: Liveness Check",
-                style: TextStyle(color: Colors.white, fontSize: 24))));
+      key: const ValueKey("transition"),
+      color: Colors.deepPurpleAccent,
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text("Step 2 of 2",
+                style: TextStyle(color: Colors.white70, fontSize: 18)),
+            SizedBox(height: 10),
+            Text("Liveness Detection",
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLivenessUI() {
+    return Container(
+      key: const ValueKey("liveness"),
+      color: Colors.black,
+      child: const Center(
+        child: Text(
+          "Liveness Detection Phase\n(Coming Soon)",
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white, fontSize: 20),
+        ),
+      ),
+    );
   }
 
   @override
   void dispose() {
+    _streamTimer?.cancel();
     _controller.dispose();
     _channel?.sink.close();
     super.dispose();
