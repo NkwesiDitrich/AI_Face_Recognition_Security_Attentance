@@ -10,6 +10,8 @@ from app.core.ai_model import load_ai_models
 from app.api.v1.user import router as user_router
 from app.api.v1.attendance import router as attendance_router
 
+
+
 app = FastAPI(
     title="AI Face Attendance System (DDD)",
     version="1.0.0",

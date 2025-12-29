@@ -17,7 +17,6 @@ enum AttendancePhase {
 class AttendanceScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
   const AttendanceScreen({super.key, required this.cameras});
-
   @override
   State<AttendanceScreen> createState() => _AttendanceScreenState();
 }
@@ -26,15 +25,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
   WebSocketChannel? _channel;
-  String _statusMessage = "Connecting...";
+  String _statusMessage = "Place your face inside the frame";
   Timer? _streamTimer;
   AttendancePhase _currentPhase = AttendancePhase.preparation;
-
   bool _isFaceRecognized = false;
+  bool _isFaceDetected = false;
   String? _recognizedUserName;
   bool _isConnected = false;
 
-  // Since you used 'adb reverse', use localhost:8000
   static const String _wsUrl = 'ws://localhost:8000/api/v1/ws/attendance';
 
   @override
@@ -55,11 +53,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _initializeCamera() {
     _controller = CameraController(
-      widget.cameras
-          .firstWhere((c) => c.lensDirection == CameraLensDirection.front),
-      ResolutionPreset.medium,
-      enableAudio: false,
-    );
+        widget.cameras
+            .firstWhere((c) => c.lensDirection == CameraLensDirection.front),
+        ResolutionPreset.medium,
+        enableAudio: false);
     _initializeControllerFuture = _controller.initialize().then((_) {
       if (mounted) _startFrameStream();
     });
@@ -70,17 +67,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
       setState(() => _isConnected = true);
       _channel!.stream.listen((data) {
+        if (_currentPhase != AttendancePhase.faceRecognition ||
+            _isFaceRecognized) return;
         final response = jsonDecode(data);
-        if (mounted) {
-          setState(() {
-            _statusMessage = response['message'] ?? "Processing...";
-            if (response['status'] == 'success' && !_isFaceRecognized) {
-              _isFaceRecognized = true;
-              _recognizedUserName = response['user'];
-              _handleSuccess();
-            }
-          });
-        }
+        setState(() {
+          _statusMessage = response['message'] ?? "Processing...";
+          _isFaceDetected = response['face_detected'] ?? false;
+          if (response['status'] == 'success') {
+            _isFaceRecognized = true;
+            _recognizedUserName = response['user'];
+            _handleFaceRecognized();
+          }
+        });
       },
           onDone: () => setState(() => _isConnected = false),
           onError: (_) => setState(() => _isConnected = false));
@@ -89,8 +87,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
   }
 
-  void _handleSuccess() {
-    Timer(const Duration(seconds: 1), () {
+  void _handleFaceRecognized() {
+    Timer(const Duration(milliseconds: 1000), () {
       if (mounted)
         setState(() => _currentPhase = AttendancePhase.livenessTransition);
     });
@@ -114,9 +112,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 500),
-        child: _buildCurrentUI(),
-      ),
+          duration: const Duration(milliseconds: 500),
+          child: _buildCurrentUI()),
     );
   }
 
@@ -129,11 +126,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildPrepUI() {
     return Container(
-      color: Colors.blueAccent,
-      child: const Center(
-          child: Text("Step 1: Face Recognition",
-              style: TextStyle(color: Colors.white, fontSize: 24))),
-    );
+        color: Colors.blueAccent,
+        child: const Center(
+            child: Text("Step 1: Face Recognition",
+                style: TextStyle(color: Colors.white, fontSize: 24))));
   }
 
   Widget _buildRecognitionUI() {
@@ -145,36 +141,35 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return Stack(
           children: [
             SizedBox.expand(child: CameraPreview(_controller)),
-            // Connection Badge
             Positioned(
-                top: 50,
+                top: 40,
                 right: 20,
                 child: CircleAvatar(
                     backgroundColor: _isConnected ? Colors.green : Colors.red,
                     radius: 8)),
-            // Face Frame
             Center(
                 child: Container(
                     width: 280,
                     height: 380,
                     decoration: BoxDecoration(
                         border: Border.all(
-                            color:
-                                _isFaceRecognized ? Colors.green : Colors.blue,
+                            color: _isFaceRecognized
+                                ? Colors.green
+                                : (_isFaceDetected
+                                    ? Colors.blue
+                                    : Colors.white30),
                             width: 3),
                         borderRadius: BorderRadius.circular(20)))),
-            // Success Message
             if (_isFaceRecognized)
               Center(
                   child: Container(
                       padding: const EdgeInsets.all(20),
-                      color: Colors.green,
+                      color: Colors.green.withOpacity(0.8),
                       child: Text("Welcome, $_recognizedUserName",
                           style: const TextStyle(
                               color: Colors.white, fontSize: 20)))),
-            // Status
             Positioned(
-                bottom: 50,
+                bottom: 40,
                 left: 20,
                 right: 20,
                 child: Text(_statusMessage,
@@ -191,7 +186,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildTransitionUI() {
     return Container(
-        color: Colors.deepPurple,
+        color: Colors.deepPurpleAccent,
         child: const Center(
             child: Text("Step 2: Liveness Check",
                 style: TextStyle(color: Colors.white, fontSize: 24))));
