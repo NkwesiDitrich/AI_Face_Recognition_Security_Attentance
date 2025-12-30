@@ -1,4 +1,5 @@
 // frontend/lib/screens/attendance_screen.dart
+// ✅ COMPLETE FIXED ATTENDANCE SCREEN
 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -18,6 +19,7 @@ enum AttendancePhase {
 class AttendanceScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
   const AttendanceScreen({super.key, required this.cameras});
+
   @override
   State<AttendanceScreen> createState() => _AttendanceScreenState();
 }
@@ -26,7 +28,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
   WebSocketChannel? _channel;
-  String _statusMessage = "Place your face inside the frame";
+  String _statusMessage = "";
   Timer? _streamTimer;
   AttendancePhase _currentPhase = AttendancePhase.preparation;
 
@@ -34,10 +36,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _isFaceDetected = false;
   String? _recognizedUserName;
   bool _isConnected = false;
+  bool _isReconnecting = false;
+  int _reconnectAttempts = 0;
   Map<String, dynamic>? _faceCoords;
 
+  // ADDED: Track recognition state
+  bool _hasShownSuccess = false;
+  Timer? _successDelayTimer;
+
   // CHANGE THIS to your computer's IP address when testing on a real phone!
-  static const String _serverIp = '127.0.0.1'; // Use 'localhost' or your PC IP
+  static const String _serverIp =
+      '192.168.124.202'; // Use 'localhost' or your PC IP
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
@@ -47,11 +56,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _startPreparationPhase() {
+    setState(() {
+      _statusMessage = "Step 1 of 2\nFace Recognition";
+    });
+
     Timer(const Duration(seconds: 2), () {
       if (mounted) {
         setState(() => _currentPhase = AttendancePhase.faceRecognition);
+        _statusMessage = "Place your face inside the frame";
         _initializeCamera();
-        _connectWebSocket();
       }
     });
   }
@@ -64,69 +77,154 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     _controller = CameraController(
       frontCamera,
-      ResolutionPreset.high, // Increased resolution for better detection
+      ResolutionPreset.high,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     _initializeControllerFuture = _controller.initialize().then((_) {
-      if (mounted) _startFrameStream();
-    });
-  }
-
-  void _connectWebSocket() {
-    try {
-      print("🔗 Connecting to WebSocket: $_wsUrl");
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
-      setState(() => _isConnected = true);
-
-      _channel!.stream.listen(
-        (data) {
-          if (_currentPhase != AttendancePhase.faceRecognition ||
-              _isFaceRecognized) return;
-
-          final response = jsonDecode(data);
-          if (mounted) {
-            setState(() {
-              _isFaceDetected = response['face_detected'] ?? false;
-              _faceCoords = response['coords'];
-
-              if (response['status'] == 'success') {
-                _isFaceRecognized = true;
-                _recognizedUserName = response['user'];
-                _statusMessage = "✔ Face recognized";
-                _handleFaceRecognized();
-              } else {
-                _statusMessage = response['message'] ?? "Processing...";
-              }
-            });
-          }
-        },
-        onDone: () {
-          print("🔌 WebSocket disconnected");
-          if (mounted) setState(() => _isConnected = false);
-        },
-        onError: (error) {
-          print("❌ WebSocket error: $error");
-          if (mounted) setState(() => _isConnected = false);
-        },
-      );
-    } catch (e) {
-      print("❌ WebSocket connection failed: $e");
-      setState(() => _isConnected = false);
-    }
-  }
-
-  void _handleFaceRecognized() {
-    Timer(const Duration(milliseconds: 1000), () {
       if (mounted) {
-        setState(() => _currentPhase = AttendancePhase.livenessTransition);
-        _startTransitionPhase();
+        _connectWebSocket();
+        _startFrameStream();
       }
     });
   }
 
-  void _startTransitionPhase() {
+  void _connectWebSocket() {
+    if (_isReconnecting) return; // Prevent multiple reconnection attempts
+
+    try {
+      print("🔌 Connecting to WebSocket: $_wsUrl");
+      _isReconnecting = true;
+      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+
+      setState(() => _isConnected = true);
+      _reconnectAttempts = 0;
+      _isReconnecting = false;
+
+      _channel!.stream.listen(
+        (data) {
+          // Process WebSocket message
+          if (data is String) {
+            try {
+              final response = jsonDecode(data);
+              _processWebSocketMessage(response);
+            } catch (e) {
+              print("❌ Error parsing WebSocket message: $e");
+            }
+          }
+        },
+        onDone: () {
+          print("👋 WebSocket disconnected");
+          if (mounted) {
+            setState(() => _isConnected = false);
+            _isReconnecting = false;
+          }
+          // Attempt to reconnect
+          _reconnectWebSocket();
+        },
+        onError: (error) {
+          print("❌ WebSocket error: $error");
+          if (mounted) {
+            setState(() => _isConnected = false);
+            _isReconnecting = false;
+          }
+        },
+      );
+    } catch (e) {
+      print("❌ WebSocket connection failed: $e");
+      if (mounted) {
+        setState(() => _isConnected = false);
+        _isReconnecting = false;
+      }
+      // Retry connection
+      _reconnectWebSocket();
+    }
+  }
+
+  void _reconnectWebSocket() {
+    if (_reconnectAttempts > 5) {
+      print("❌ Max reconnection attempts reached");
+      if (mounted) {
+        setState(() {
+          _statusMessage = "Connection failed. Please restart the app.";
+        });
+      }
+      return;
+    }
+
+    _reconnectAttempts++;
+    print("🔄 Reconnection attempt $_reconnectAttempts...");
+
+    Timer(Duration(seconds: 1), () {
+      if (mounted && !_isConnected && !_isReconnecting) {
+        _connectWebSocket();
+      }
+    });
+  }
+
+  void _processWebSocketMessage(Map<String, dynamic> response) {
+    if (!mounted) return;
+
+    final status = response['status'];
+    final faceDetected = response['face_detected'] ?? false;
+    final message = response['message'] ?? "";
+    final user = response['user'];
+
+    print(
+        "📨 WebSocket response: status=$status, face_detected=$faceDetected, user=$user");
+
+    setState(() {
+      _isFaceDetected = faceDetected;
+      _faceCoords = response['coords'];
+
+      if (status == 'success' && user != null) {
+        // ✅ FACE RECOGNIZED!
+        if (!_hasShownSuccess) {
+          _hasShownSuccess = true;
+          _recognizedUserName = user;
+          _statusMessage = "✔ Face recognized\nWelcome, $user";
+
+          // Cancel any pending timers
+          _successDelayTimer?.cancel();
+
+          // Move to next phase after a delay
+          _successDelayTimer = Timer(const Duration(milliseconds: 1500), () {
+            if (mounted) {
+              _handleFaceRecognized();
+            }
+          });
+        }
+      } else if (status == 'fail' && faceDetected) {
+        // Face detected but NOT registered
+        if (!_hasShownSuccess) {
+          _statusMessage = "❌ Face not registered\nPlease enroll first";
+        }
+      } else if (status == 'no_face' || !faceDetected) {
+        // No face detected
+        if (!_hasShownSuccess) {
+          _statusMessage = "Place your face inside the frame";
+        }
+      } else if (status == 'processing') {
+        // Still processing previous frame
+        if (!_hasShownSuccess) {
+          _statusMessage = "Processing...";
+        }
+      } else {
+        // Other status
+        if (!_hasShownSuccess) {
+          _statusMessage = message;
+        }
+      }
+    });
+  }
+
+  void _handleFaceRecognized() {
+    if (!mounted) return;
+
+    setState(() => _currentPhase = AttendancePhase.livenessTransition);
+
+    // Show transition screen
     Timer(const Duration(seconds: 1), () {
       if (mounted) {
         setState(() => _currentPhase = AttendancePhase.livenessDetection);
@@ -135,21 +233,44 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _startFrameStream() {
-    _controller.startImageStream((image) {
-      if (_currentPhase != AttendancePhase.faceRecognition || _isFaceRecognized)
-        return;
+    if (!_controller.value.isInitialized) return;
 
-      // Stream every 400ms for a good balance of speed and detection
-      if (_streamTimer == null || !_streamTimer!.isActive) {
-        _streamTimer = Timer(const Duration(milliseconds: 400), () {
-          final bytes = convertYUV420toImage(image);
-          if (bytes != null && _isConnected) {
-            _channel?.sink.add(bytes);
-          }
-          _streamTimer = null;
-        });
+    _controller.startImageStream((CameraImage image) {
+      // Only process frames during face recognition phase
+      if (_currentPhase != AttendancePhase.faceRecognition ||
+          _isFaceRecognized ||
+          _hasShownSuccess ||
+          !_isConnected ||
+          _channel == null) {
+        return;
       }
+
+      // Rate limiting: process one frame every 500ms
+      if (_streamTimer != null && _streamTimer!.isActive) {
+        return;
+      }
+
+      _streamTimer = Timer(const Duration(milliseconds: 500), () {
+        try {
+          final bytes = convertYUV420toImage(image);
+          if (bytes != null && _isConnected && _channel != null) {
+            _channel!.sink.add(bytes);
+          }
+        } catch (e) {
+          print("❌ Error sending frame: $e");
+        }
+        _streamTimer = null;
+      });
     });
+  }
+
+  @override
+  void dispose() {
+    _streamTimer?.cancel();
+    _successDelayTimer?.cancel();
+    _controller.dispose();
+    _channel?.sink.close();
+    super.dispose();
   }
 
   @override
@@ -180,14 +301,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     return Container(
       key: const ValueKey("prep"),
       color: Colors.blueAccent,
-      child: const Center(
+      child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text("Step 1 of 2",
                 style: TextStyle(color: Colors.white70, fontSize: 18)),
-            SizedBox(height: 10),
-            Text("Face Recognition",
+            const SizedBox(height: 10),
+            const Text("Face Recognition",
                 style: TextStyle(
                     color: Colors.white,
                     fontSize: 28,
@@ -199,94 +320,77 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildRecognitionUI() {
-    return FutureBuilder(
-      future: _initializeControllerFuture,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        return Stack(
-          children: [
-            SizedBox.expand(child: CameraPreview(_controller)),
+    return Stack(
+      children: [
+        // Camera preview
+        SizedBox.expand(
+          child: CameraPreview(_controller),
+        ),
 
-            // DYNAMIC GREEN FRAME
-            if (_isFaceDetected && _faceCoords != null)
-              Positioned(
-                left: _faceCoords!['x'] * MediaQuery.of(context).size.width,
-                top: _faceCoords!['y'] * MediaQuery.of(context).size.height,
-                width: _faceCoords!['w'] * MediaQuery.of(context).size.width,
-                height: _faceCoords!['h'] * MediaQuery.of(context).size.height,
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.green, width: 3),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-              ),
-
-            Positioned(
-              top: 40,
-              right: 20,
-              child: CircleAvatar(
-                backgroundColor: _isConnected ? Colors.green : Colors.red,
-                radius: 8,
+        // Face frame overlay
+        if (_faceCoords != null)
+          Positioned(
+            left: _faceCoords!['x'] * MediaQuery.of(context).size.width,
+            top: _faceCoords!['y'] * MediaQuery.of(context).size.height,
+            width: _faceCoords!['w'] * MediaQuery.of(context).size.width,
+            height: _faceCoords!['h'] * MediaQuery.of(context).size.height,
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.green, width: 3),
+                borderRadius: BorderRadius.circular(10),
               ),
             ),
+          ),
 
-            if (_isFaceRecognized)
-              Center(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withOpacity(0.9),
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.check_circle,
-                          color: Colors.white, size: 60),
-                      const SizedBox(height: 10),
-                      Text(
-                        "Welcome, $_recognizedUserName",
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            Positioned(
-              bottom: 60,
-              left: 30,
-              right: 30,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(25),
-                ),
-                child: Text(
+        // Status overlay
+        Positioned(
+          bottom: 20,
+          left: 20,
+          right: 20,
+          child: Container(
+            padding: const EdgeInsets.all(15),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              children: [
+                Text(
                   _statusMessage,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                  ),
                 ),
-              ),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _isConnected ? Icons.cloud_done : Icons.cloud_off,
+                      color: _isConnected ? Colors.green : Colors.red,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _isConnected ? "Connected" : "Disconnected",
+                      style: TextStyle(
+                        color: _isConnected ? Colors.green : Colors.red,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
 
   Widget _buildTransitionUI() {
     return Container(
-      key: const ValueKey("transition"),
-      color: Colors.deepPurpleAccent,
+      color: Colors.purpleAccent,
       child: const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -307,23 +411,24 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildLivenessUI() {
     return Container(
-      key: const ValueKey("liveness"),
-      color: Colors.black,
-      child: const Center(
-        child: Text(
-          "Liveness Detection Phase\n(Coming Soon)",
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white, fontSize: 20),
+      color: Colors.purple,
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.face, size: 100, color: Colors.white),
+            const SizedBox(height: 20),
+            const Text("Liveness Detection",
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            const Text("Please reproduce the emoji expression",
+                style: TextStyle(color: Colors.white70, fontSize: 16)),
+          ],
         ),
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _streamTimer?.cancel();
-    _controller.dispose();
-    _channel?.sink.close();
-    super.dispose();
   }
 }
