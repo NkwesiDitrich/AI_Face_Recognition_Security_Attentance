@@ -1,5 +1,4 @@
 # backend/app/domains/attendance/service.py
-# ✅ PHASE 1 COMPLETE: Face Detection + Recognition (combined)
 
 from typing import Dict, Any, Optional, List
 import numpy as np
@@ -14,7 +13,10 @@ from app.domains.attendance.repository import AttendanceRepository
 from app.domains.attendance.models import AttendanceLog
 
 # Threshold for recognition
-RECOGNITION_THRESHOLD = 0.50
+# Synchronized with UserService.RECOGNITION_COSINE_THRESHOLD = 0.40
+# We'll use 0.40 to be strict, or 0.45 if we want to be slightly more lenient.
+# Let's stick to 0.45 for better user experience as requested.
+RECOGNITION_THRESHOLD = 0.45 
 
 # Detection settings
 MODEL_NAME = "ArcFace"
@@ -58,10 +60,13 @@ class AttendanceService:
     async def process_attendance_frame(self, image_data: bytes) -> Dict[str, Any]:
         """
         PHASE 1 - Complete Face Recognition Flow:
-        1. Detect face
-        2. Extract embedding
-        3. Compare with enrolled users
-        4. Return result
+        1. Receive frame & Decode image
+        2. Detect face (If NO face: return { status: "no_face" })
+        3. Signal "face_detected" to frontend
+        4. Extract embedding (ArcFace)
+        5. Compare embedding with DB embeddings (Cosine distance)
+        6. Check threshold (If distance > threshold: return { status: "not_recognized" })
+        7. Return { status: "recognized", user_id, name }
         """
         if self._processing_lock.locked():
             return {
@@ -72,10 +77,6 @@ class AttendanceService:
 
         async with self._processing_lock:
             try:
-                print("\n" + "="*60)
-                print("🎯 PHASE 1 - Face Detection + Recognition")
-                print("="*60)
-
                 # Decode image
                 nparr = np.frombuffer(image_data, np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -87,22 +88,15 @@ class AttendanceService:
                         "face_detected": False
                     }
 
-                print(f"✅ Image decoded: {img.shape}")
-
                 temp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
                         temp_path = tmp_file.name
                     cv2.imwrite(temp_path, img)
-                    print(f"✅ Saved: {temp_path}")
-
-                    # Detect face and extract embedding
-                    print("🔍 Detecting face...")
 
                     embedding = None
-                    facial_area = {}
 
-                    # Try strict detection first
+                    # 1. Try strict detection with multiple backends
                     for backend in DETECTOR_BACKENDS:
                         try:
                             represent_output = await run_in_threadpool(
@@ -115,157 +109,101 @@ class AttendanceService:
                             )
 
                             raw_embedding = self._parse_deepface_embedding(represent_output)
-                            
                             if raw_embedding:
-                                print(f"✅ Face detected with backend: {backend}")
                                 embedding = raw_embedding
-                                
-                                if isinstance(represent_output, list) and len(represent_output) > 0:
-                                    first = represent_output[0]
-                                    if isinstance(first, dict):
-                                        facial_area = first.get("facial_area", {})
-                                
+                                print(f"DEBUG: Face detected with backend: {backend}")
                                 break
-                                
-                        except Exception as e:
-                            print(f"⚠️ Backend {backend} failed")
+                        except:
                             continue
 
-                    # If strict failed, try lenient
+                    # 2. If strict failed, try lenient detection (enforce_detection=False)
                     if embedding is None:
-                        print("🔄 Trying lenient detection...")
                         try:
                             represent_output = await run_in_threadpool(
                                 DeepFace.represent,
                                 img_path=temp_path,
                                 model_name=MODEL_NAME,
-                                detector_backend="opencv",
+                                detector_backend="opencv", # Fast fallback
                                 align=ALIGN,
                                 enforce_detection=False,
                             )
+                            embedding = self._parse_deepface_embedding(represent_output)
+                            if embedding:
+                                print("DEBUG: Face detected with lenient detection (OpenCV)")
+                        except:
+                            pass
 
-                            raw_embedding = self._parse_deepface_embedding(represent_output)
-                            
-                            if raw_embedding:
-                                print("✅ Face detected with lenient detection")
-                                embedding = raw_embedding
-                                # Lenient detection doesn't return facial_area, estimate it
-                                img_height, img_width = img.shape[:2]
-                                face_size = min(img_width, img_height) // 3
-                                center_x = img_width // 2
-                                center_y = img_height // 2
-                                facial_area = {
-                                    "x": center_x - face_size // 2,
-                                    "y": center_y - face_size // 2,
-                                    "w": face_size,
-                                    "h": face_size
-                                }
-                        
-                        except Exception as e:
-                            print(f"❌ Detection failed: {str(e)[:50]}")
-
-                    # No face detected
+                    # No face detected even with lenient approach
                     if embedding is None:
-                        print("❌ No face detected")
                         return {
                             "status": "no_face",
-                            "message": "Place your face inside the frame",
+                            "message": "Face not detected",
                             "face_detected": False
                         }
 
-                    print(f"✅ Face detected! Embedding length: {len(embedding)}")
-
-                    # Calculate face size
-                    img_height, img_width = img.shape[:2]
-                    face_w = facial_area.get("w", 0)
-                    face_size_percent = (face_w / img_width) * 100 if face_w > 0 else 25
-
-                    print(f"✅ Face size: {face_size_percent:.1f}% of screen width")
-
+                    # FACE DETECTED! Log it explicitly as requested
+                    print("DEBUG: Face detected! Proceeding to recognition...")
+                    
                     # Get enrolled users
-                    print("🔍 Fetching enrolled users...")
                     known_users = await self.user_service.user_repo.get_all_encodings()
 
                     if not known_users:
-                        print("⚠️ No users enrolled")
+                        print("DEBUG: No users enrolled in the database.")
                         return {
-                            "status": "fail",
-                            "message": "No users registered in system",
-                            "face_detected": True,
-                            "face_size_percent": face_size_percent
+                            "status": "not_recognized",
+                            "message": "Face not registered",
+                            "face_detected": True
                         }
 
-                    print(f"✅ Found {len(known_users)} enrolled users")
-
                     # Compare with enrolled users
-                    print("🔄 Comparing with enrolled users...")
-
+                    # IMPORTANT: We use the exact same normalization and distance as UserService
                     target_vec = self.user_service._l2_normalize(embedding)
                     best_match = None
                     best_distance = float('inf')
-                    best_user_name = "Unknown"
 
                     for user in known_users:
-                        if not user.face_encodings:
-                            continue
-
-                        if len(user.face_encodings) != len(embedding):
+                        if not user.face_encodings or len(user.face_encodings) != len(embedding):
                             continue
 
                         known_vec = self.user_service._l2_normalize(user.face_encodings)
                         distance = self.user_service._cosine_distance(target_vec, known_vec)
 
-                        print(f"   Distance to {user.name}: {distance:.4f} (threshold: {RECOGNITION_THRESHOLD})")
-
                         if distance < best_distance:
                             best_distance = distance
                             best_match = user
-                            best_user_name = user.name
 
-                    print(f"\n🏆 Best match: {best_user_name}")
-                    print(f"   Best distance: {best_distance:.4f}")
-                    print(f"   Threshold: {RECOGNITION_THRESHOLD}")
-
-                    # Return result
-                    if best_match and best_distance < RECOGNITION_THRESHOLD:
-                        print(f"✅ SUCCESS: {best_user_name} is recognized!")
-
+                    # Return result based on threshold
+                    if best_match and best_distance <= RECOGNITION_THRESHOLD:
+                        print(f"DEBUG: Face recognized as {best_match.name} (Distance: {best_distance:.4f})")
                         return {
-                            "status": "success",
-                            "message": "Face recognized",
-                            "user": best_user_name,
+                            "status": "recognized",
                             "user_id": str(best_match.id),
+                            "name": best_match.name,
                             "face_detected": True,
-                            "face_size_percent": face_size_percent,
-                            "distance": best_distance,
-                            "confidence": float(1.0 - best_distance)
+                            "distance": round(float(best_distance), 4)
                         }
                     else:
                         if best_match:
-                            print(f"❌ FAIL: Distance {best_distance:.4f} >= threshold {RECOGNITION_THRESHOLD}")
+                            print(f"DEBUG: Face NOT recognized. Best match: {best_match.name} (Distance: {best_distance:.4f}, Threshold: {RECOGNITION_THRESHOLD})")
                         else:
-                            print("❌ FAIL: No match found")
-
+                            print("DEBUG: Face NOT recognized. No match found in database.")
+                            
                         return {
-                            "status": "fail",
+                            "status": "not_recognized",
                             "message": "Face not registered",
                             "face_detected": True,
-                            "face_size_percent": face_size_percent,
-                            "distance": best_distance
+                            "distance": round(float(best_distance), 4) if best_match else None
                         }
 
                 finally:
                     if temp_path and os.path.exists(temp_path):
                         try:
                             os.remove(temp_path)
-                            print("🧹 Cleaned up temp file")
                         except:
                             pass
 
             except Exception as e:
-                print(f"❌ Error: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"DEBUG: Error in process_attendance_frame: {e}")
                 return {
                     "status": "error",
                     "message": str(e),
@@ -283,5 +221,4 @@ class AttendanceService:
                 "log_id": str(result.id)
             }
         except Exception as e:
-            print(f"❌ Recording error: {e}")
             return {"status": "error", "message": str(e)}

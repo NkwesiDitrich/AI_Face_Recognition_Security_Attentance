@@ -1,5 +1,4 @@
 // frontend/lib/screens/attendance_screen.dart
-// ✅ COMPLETE FIXED: 3x larger frame + proper recognition flow
 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -9,12 +8,10 @@ import 'dart:convert';
 import 'package:ai_face_attendance_frontend/utils/image_converter.dart';
 
 enum AttendancePhase {
-  preparation,
-  faceDetection,
-  recognitionTrigger,
-  livenessTransition,
-  livenessDetection,
-  finalResult
+  phase0, // Entry Animation
+  phase1, // Face Recognition
+  phase2, // Transition Animation
+  liveness, // Liveness Detection (Next stage)
 }
 
 class AttendanceScreen extends StatefulWidget {
@@ -29,61 +26,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
   WebSocketChannel? _channel;
-  String _statusMessage = "";
+  String _statusMessage = "Place your face inside the frame";
   Timer? _streamTimer;
-  AttendancePhase _currentPhase = AttendancePhase.preparation;
+  AttendancePhase _currentPhase = AttendancePhase.phase0;
 
   bool _isConnected = false;
   bool _isReconnecting = false;
   int _reconnectAttempts = 0;
 
-  // Face detection state
-  bool _faceDetected = false;
-  Map<String, dynamic>? _faceData;
-
-  // Frame settings - 3x LARGER (135% of screen width)
-  static const double FRAME_SIZE_RATIO = 1.35;
-
-  // Face size thresholds
-  static const double MIN_FACE_SIZE_PERCENT = 15;
-  static const double MAX_FACE_SIZE_PERCENT = 50;
-
-  // Stability detection
-  DateTime? _faceStableStartTime;
-  static const Duration STABLE_DURATION = Duration(milliseconds: 800);
-  bool _isFaceStable = false;
-
   // Recognition state
-  bool _recognitionTriggered = false;
-  bool _hasShownSuccess = false;
+  bool _faceDetected = false;
+  bool _isRecognized = false;
   String? _recognizedUserName;
-  Timer? _successDelayTimer;
-  Timer? _reconnectionTimer;
+  String? _recognizedUserId;
 
   // CHANGE THIS to your computer's IP address
-  static const String _serverIp = '192.168.124.202';
+  static const String _serverIp = '192.168.36.202';
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
   void initState() {
     super.initState();
-    _startPreparationPhase();
+    _startPhase0();
   }
 
-  void _startPreparationPhase() {
+  void _startPhase0() {
     setState(() {
-      _statusMessage = "Step 1 of 2\nFace Recognition";
+      _currentPhase = AttendancePhase.phase0;
     });
 
     Timer(const Duration(seconds: 2), () {
       if (mounted) {
-        setState(() {
-          _currentPhase = AttendancePhase.faceDetection;
-          _statusMessage = "Place your face inside the frame";
-        });
-        _initializeCamera();
+        _startPhase1();
       }
     });
+  }
+
+  void _startPhase1() {
+    setState(() {
+      _currentPhase = AttendancePhase.phase1;
+    });
+    _initializeCamera();
   }
 
   void _initializeCamera() {
@@ -110,10 +93,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     if (_isReconnecting) return;
-    _reconnectionTimer?.cancel();
 
     try {
-      print("🔌 Connecting to WebSocket: $_wsUrl");
       _isReconnecting = true;
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
 
@@ -124,12 +105,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               final response = jsonDecode(data);
               _processWebSocketMessage(response);
             } catch (e) {
-              print("❌ Error parsing WebSocket message: $e");
+              debugPrint("❌ Error parsing WebSocket message: $e");
             }
           }
         },
         onDone: () {
-          print("👋 WebSocket disconnected");
           if (mounted) {
             setState(() {
               _isConnected = false;
@@ -139,7 +119,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           _reconnectWebSocket();
         },
         onError: (error) {
-          print("❌ WebSocket error: $error");
           if (mounted) {
             setState(() {
               _isConnected = false;
@@ -158,7 +137,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         });
       }
     } catch (e) {
-      print("❌ WebSocket connection failed: $e");
       if (mounted) {
         setState(() {
           _isConnected = false;
@@ -170,20 +148,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _reconnectWebSocket() {
-    if (_reconnectAttempts > 5) {
-      print("❌ Max reconnection attempts reached");
-      if (mounted) {
-        setState(() {
-          _statusMessage = "Connection failed. Please restart the app.";
-        });
-      }
-      return;
-    }
-
+    if (_reconnectAttempts > 5) return;
     _reconnectAttempts++;
-    print("🔄 Reconnection attempt $_reconnectAttempts...");
-
-    _reconnectionTimer = Timer(Duration(seconds: 2), () {
+    Timer(const Duration(seconds: 2), () {
       if (mounted && !_isConnected && !_isReconnecting) {
         _connectWebSocket();
       }
@@ -192,126 +159,51 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _processWebSocketMessage(Map<String, dynamic> response) {
     if (!mounted) return;
-    if (_hasShownSuccess) return;
+    if (_isRecognized) return;
 
     final status = response['status'];
+    final name = response['name'];
+    final userId = response['user_id'];
     final faceDetected = response['face_detected'] ?? false;
-    final message = response['message'] ?? "";
-    final user = response['user'];
-    final face = response['face'];
-
-    print(
-        "📨 WebSocket: status=$status, face_detected=$faceDetected, user=$user");
 
     setState(() {
       _faceDetected = faceDetected;
-      _faceData = face != null ? Map<String, dynamic>.from(face) : null;
 
-      if (status == 'success' && user != null) {
-        _hasShownSuccess = true;
-        _recognizedUserName = user;
-        _statusMessage = "✔ Face recognized\nWelcome, $user";
+      if (status == 'recognized') {
+        _isRecognized = true;
+        _recognizedUserName = name;
+        _recognizedUserId = userId;
+        _statusMessage = "✔ Face recognized";
 
-        _successDelayTimer?.cancel();
-        _reconnectionTimer?.cancel();
-
-        _successDelayTimer = Timer(const Duration(milliseconds: 1500), () {
+        // Stop recognition and proceed to Phase 2 after delay
+        Timer(const Duration(milliseconds: 1000), () {
           if (mounted) {
-            _handleFaceRecognized();
+            _startPhase2();
           }
         });
-      } else if (status == 'fail' && faceDetected) {
-        _statusMessage = "❌ Face not registered\nPlease enroll first";
-        _faceStableStartTime = null;
-        _isFaceStable = false;
-        _recognitionTriggered = false;
-      } else if (status == 'face_detected') {
-        _handleFaceDetection(face);
-      } else if (status == 'no_face' || !faceDetected) {
-        _faceData = null;
-        _faceStableStartTime = null;
-        _isFaceStable = false;
-        _recognitionTriggered = false;
-        _statusMessage = "Place your face inside the frame";
+      } else if (status == 'no_face') {
+        _statusMessage = "Face not detected";
+      } else if (status == 'not_recognized') {
+        _statusMessage = "Face detected! But not registered";
       } else if (status == 'processing') {
-        _statusMessage = "Processing...";
-      } else if (status == 'error') {
-        _statusMessage = "Error: $message";
+        // Keep current message
       } else {
-        _statusMessage = message;
+        _statusMessage =
+            response['message'] ?? "Place your face inside the frame";
       }
     });
   }
 
-  void _handleFaceDetection(Map<String, dynamic>? faceData) {
-    if (faceData == null) {
-      _statusMessage = "Place your face inside the frame";
-      return;
-    }
-
-    final faceX = faceData['x'] ?? 0;
-    final faceY = faceData['y'] ?? 0;
-    final faceW = faceData['w'] ?? 0;
-    final faceH = faceData['h'] ?? 0;
-    final faceSize = faceData['size_percent'] ?? 0;
-
-    final frameLeft = (1.0 - FRAME_SIZE_RATIO) / 2;
-    final frameRight = frameLeft + FRAME_SIZE_RATIO;
-    final frameTop = (1.0 - FRAME_SIZE_RATIO) / 2;
-    final frameBottom = frameTop + FRAME_SIZE_RATIO;
-
-    final faceInsideFrame = faceX >= frameLeft &&
-        faceX + faceW <= frameRight &&
-        faceY >= frameTop &&
-        faceY + faceH <= frameBottom;
-
-    final faceTooSmall = faceSize < MIN_FACE_SIZE_PERCENT;
-    final faceTooBig = faceSize > MAX_FACE_SIZE_PERCENT;
-
-    if (!faceInsideFrame) {
-      _statusMessage = "Center your face";
-      _faceStableStartTime = null;
-      _isFaceStable = false;
-      _recognitionTriggered = false;
-    } else if (faceTooSmall) {
-      _statusMessage = "Move closer";
-      _faceStableStartTime = null;
-      _isFaceStable = false;
-      _recognitionTriggered = false;
-    } else if (faceTooBig) {
-      _statusMessage = "Move back";
-      _faceStableStartTime = null;
-      _isFaceStable = false;
-      _recognitionTriggered = false;
-    } else {
-      if (_faceStableStartTime == null) {
-        _faceStableStartTime = DateTime.now();
-        _statusMessage = "Hold still...";
-      } else {
-        final DateTime stableStart = _faceStableStartTime!;
-        final elapsed = DateTime.now().difference(stableStart);
-        if (elapsed >= STABLE_DURATION) {
-          if (!_recognitionTriggered) {
-            _recognitionTriggered = true;
-            _isFaceStable = true;
-            _statusMessage = "🔄 Recognizing...";
-          }
-        } else {
-          final remaining = (STABLE_DURATION - elapsed).inMilliseconds;
-          _statusMessage =
-              "Hold still... ${(remaining / 1000).toStringAsFixed(1)}s";
-        }
-      }
-    }
-  }
-
-  void _handleFaceRecognized() {
-    if (!mounted) return;
-    setState(() => _currentPhase = AttendancePhase.livenessTransition);
+  void _startPhase2() {
+    setState(() {
+      _currentPhase = AttendancePhase.phase2;
+    });
 
     Timer(const Duration(seconds: 1), () {
       if (mounted) {
-        setState(() => _currentPhase = AttendancePhase.livenessDetection);
+        setState(() {
+          _currentPhase = AttendancePhase.liveness;
+        });
       }
     });
   }
@@ -320,9 +212,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (!_controller.value.isInitialized) return;
 
     _controller.startImageStream((CameraImage image) {
-      if (_currentPhase != AttendancePhase.faceDetection ||
-          _hasShownSuccess ||
-          _recognitionTriggered ||
+      if (_currentPhase != AttendancePhase.phase1 ||
+          _isRecognized ||
           !_isConnected ||
           _channel == null) {
         return;
@@ -339,7 +230,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             _channel!.sink.add(bytes);
           }
         } catch (e) {
-          print("❌ Error sending frame: $e");
+          debugPrint("❌ Error sending frame: $e");
         }
         _streamTimer = null;
       });
@@ -349,8 +240,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   @override
   void dispose() {
     _streamTimer?.cancel();
-    _successDelayTimer?.cancel();
-    _reconnectionTimer?.cancel();
     _controller.dispose();
     _channel?.sink.close();
     super.dispose();
@@ -368,30 +257,29 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildCurrentUI() {
     switch (_currentPhase) {
-      case AttendancePhase.preparation:
-        return _buildPrepUI();
-      case AttendancePhase.livenessTransition:
-        return _buildTransitionUI();
-      case AttendancePhase.livenessDetection:
+      case AttendancePhase.phase0:
+        return _buildPhase0UI();
+      case AttendancePhase.phase1:
+        return _buildPhase1UI();
+      case AttendancePhase.phase2:
+        return _buildPhase2UI();
+      case AttendancePhase.liveness:
         return _buildLivenessUI();
-      case AttendancePhase.faceDetection:
-      default:
-        return _buildFaceDetectionUI();
     }
   }
 
-  Widget _buildPrepUI() {
+  Widget _buildPhase0UI() {
     return Container(
-      key: const ValueKey("prep"),
+      key: const ValueKey("phase0"),
       color: Colors.blueAccent,
-      child: Center(
+      child: const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text("Step 1 of 2",
                 style: TextStyle(color: Colors.white70, fontSize: 18)),
-            const SizedBox(height: 10),
-            const Text("Face Recognition",
+            SizedBox(height: 10),
+            Text("Face Recognition",
                 style: TextStyle(
                     color: Colors.white,
                     fontSize: 28,
@@ -402,167 +290,110 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     );
   }
 
-  Widget _buildFaceDetectionUI() {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final screenHeight = MediaQuery.of(context).size.height;
-    final frameSize = screenWidth * FRAME_SIZE_RATIO;
+  Widget _buildPhase1UI() {
+    if (!_controller.value.isInitialized) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-    final frameLeft = (screenWidth - frameSize) / 2;
-    final frameTop = (screenHeight - frameSize) / 2;
-
-    Color frameColor;
-    if (_recognitionTriggered) {
-      frameColor = Colors.blue;
-    } else if (_isFaceStable) {
+    Color frameColor = Colors.white;
+    if (_isRecognized) {
       frameColor = Colors.green;
+    } else if (_statusMessage == "Face detected! But not registered") {
+      frameColor = Colors.red;
     } else if (_faceDetected) {
       frameColor = Colors.orange;
-    } else {
-      frameColor = Colors.white;
     }
 
     return Stack(
+      key: const ValueKey("phase1"),
       children: [
-        SizedBox.expand(
-          child: CameraPreview(_controller),
-        ),
+        SizedBox.expand(child: CameraPreview(_controller)),
 
-        // 3x LARGER GUIDE FRAME (135% of screen width)
-        Positioned(
-          left: frameLeft,
-          top: frameTop,
+        // Fixed Guide Frame
+        Center(
           child: Container(
-            width: frameSize,
-            height: frameSize,
+            width: 280,
+            height: 280,
             decoration: BoxDecoration(
-              border: Border.all(color: frameColor, width: 4),
-              borderRadius: BorderRadius.circular(30),
-            ),
-            child: Stack(
-              children: [
-                _buildCornerMarker(frameColor, true, true),
-                _buildCornerMarker(frameColor, true, false),
-                _buildCornerMarker(frameColor, false, true),
-                _buildCornerMarker(frameColor, false, false),
-                if (!_faceDetected)
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 15, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Text(
-                        "Put your face here",
-                        style: TextStyle(color: Colors.white, fontSize: 14),
-                      ),
-                    ),
-                  ),
-              ],
+              border: Border.all(
+                color: frameColor,
+                width: 4,
+              ),
+              borderRadius: BorderRadius.circular(20),
             ),
           ),
         ),
 
-        // Size indicator
+        // Live Messages
         Positioned(
-          top: frameTop - 60,
+          bottom: 100,
           left: 0,
           right: 0,
           child: Center(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
               decoration: BoxDecoration(
                 color: Colors.black54,
-                borderRadius: BorderRadius.circular(5),
+                borderRadius: BorderRadius.circular(10),
               ),
-              child: Text(
-                _faceDetected
-                    ? "Face size: ${_faceData?['size_percent']?.toStringAsFixed(0) ?? 0}%"
-                    : "Frame: ${(FRAME_SIZE_RATIO * 100).toStringAsFixed(0)}% of screen",
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_faceDetected &&
+                      !_isRecognized &&
+                      _statusMessage != "Face detected! But not registered")
+                    const Text(
+                      "Face Detected! Hold still...",
+                      style: TextStyle(
+                          color: Colors.orange,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  Text(
+                    _statusMessage,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ],
               ),
             ),
           ),
         ),
 
-        // Status overlay
-        Positioned(
-          bottom: 20,
-          left: 20,
-          right: 20,
-          child: Container(
-            padding: const EdgeInsets.all(15),
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Column(
-              children: [
-                Text(
-                  _statusMessage,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _isConnected ? Icons.cloud_done : Icons.cloud_off,
-                      color: _isConnected ? Colors.green : Colors.red,
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      _isConnected ? "Connected" : "Disconnected",
-                      style: TextStyle(
-                        color: _isConnected ? Colors.green : Colors.red,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+        // Success Overlay
+        if (_isRecognized)
+          Center(
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.check_circle, color: Colors.white, size: 60),
+                  const SizedBox(height: 10),
+                  Text("✔ Face recognized\nWelcome, $_recognizedUserName",
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
             ),
           ),
-        ),
       ],
     );
   }
 
-  Widget _buildCornerMarker(Color color, bool isTop, bool isLeft) {
-    final width = isTop ? 40 : 30;
-    final height = isTop ? 30 : 40;
-
-    return Positioned(
-      top: isTop ? -4 : null,
-      bottom: isTop ? null : -4,
-      left: isLeft ? -4 : null,
-      right: isLeft ? null : -4,
-      child: Container(
-        width: width.toDouble(),
-        height: height.toDouble(),
-        decoration: BoxDecoration(
-          border: Border(
-            top: isTop ? BorderSide(color: color, width: 6) : BorderSide.none,
-            bottom:
-                isTop ? BorderSide.none : BorderSide(color: color, width: 6),
-            left: isLeft ? BorderSide(color: color, width: 6) : BorderSide.none,
-            right:
-                isLeft ? BorderSide.none : BorderSide(color: color, width: 6),
-          ),
-          borderRadius: BorderRadius.circular(10),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTransitionUI() {
+  Widget _buildPhase2UI() {
     return Container(
-      color: Colors.purpleAccent,
+      key: const ValueKey("phase2"),
+      color: Colors.blueGrey,
       child: const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -583,23 +414,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   Widget _buildLivenessUI() {
     return Container(
+      key: const ValueKey("liveness"),
       color: Colors.purple,
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.face, size: 100, color: Colors.white),
-            const SizedBox(height: 20),
-            const Text("Liveness Detection",
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            const Text("Please reproduce the emoji expression",
-                style: TextStyle(color: Colors.white70, fontSize: 16)),
-          ],
-        ),
+      child: const Center(
+        child: Text("Liveness Detection Stage",
+            style: TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold)),
       ),
     );
   }
