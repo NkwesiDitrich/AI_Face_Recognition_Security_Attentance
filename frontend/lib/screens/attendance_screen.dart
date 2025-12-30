@@ -1,5 +1,5 @@
 // frontend/lib/screens/attendance_screen.dart
-// ✅ COMPLETE FIXED ATTENDANCE SCREEN
+// ✅ FIXED: Complete attendance screen with proper state management
 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -40,9 +40,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   int _reconnectAttempts = 0;
   Map<String, dynamic>? _faceCoords;
 
-  // ADDED: Track recognition state
+  // ✅ ADDED: Track recognition state to prevent reset
   bool _hasShownSuccess = false;
   Timer? _successDelayTimer;
+  Timer? _reconnectionTimer;
 
   // CHANGE THIS to your computer's IP address when testing on a real phone!
   static const String _serverIp =
@@ -84,6 +85,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     _initializeControllerFuture = _controller.initialize().then((_) {
       if (mounted) {
+        setState(() {});
         _connectWebSocket();
         _startFrameStream();
       }
@@ -91,20 +93,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _connectWebSocket() {
-    if (_isReconnecting) return; // Prevent multiple reconnection attempts
+    if (_isReconnecting) return;
+
+    // Cancel any pending reconnection
+    _reconnectionTimer?.cancel();
 
     try {
       print("🔌 Connecting to WebSocket: $_wsUrl");
       _isReconnecting = true;
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
 
-      setState(() => _isConnected = true);
-      _reconnectAttempts = 0;
-      _isReconnecting = false;
-
       _channel!.stream.listen(
         (data) {
-          // Process WebSocket message
           if (data is String) {
             try {
               final response = jsonDecode(data);
@@ -117,27 +117,40 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         onDone: () {
           print("👋 WebSocket disconnected");
           if (mounted) {
-            setState(() => _isConnected = false);
-            _isReconnecting = false;
+            setState(() {
+              _isConnected = false;
+              _isReconnecting = false;
+            });
           }
-          // Attempt to reconnect
           _reconnectWebSocket();
         },
         onError: (error) {
           print("❌ WebSocket error: $error");
           if (mounted) {
-            setState(() => _isConnected = false);
-            _isReconnecting = false;
+            setState(() {
+              _isConnected = false;
+              _isReconnecting = false;
+            });
           }
+          _reconnectWebSocket();
         },
       );
+
+      if (mounted) {
+        setState(() {
+          _isConnected = true;
+          _reconnectAttempts = 0;
+          _isReconnecting = false;
+        });
+      }
     } catch (e) {
       print("❌ WebSocket connection failed: $e");
       if (mounted) {
-        setState(() => _isConnected = false);
-        _isReconnecting = false;
+        setState(() {
+          _isConnected = false;
+          _isReconnecting = false;
+        });
       }
-      // Retry connection
       _reconnectWebSocket();
     }
   }
@@ -156,7 +169,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _reconnectAttempts++;
     print("🔄 Reconnection attempt $_reconnectAttempts...");
 
-    Timer(Duration(seconds: 1), () {
+    _reconnectionTimer = Timer(Duration(seconds: 2), () {
       if (mounted && !_isConnected && !_isReconnecting) {
         _connectWebSocket();
       }
@@ -165,6 +178,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _processWebSocketMessage(Map<String, dynamic> response) {
     if (!mounted) return;
+
+    // ✅ Don't process if already shown success
+    if (_hasShownSuccess) return;
 
     final status = response['status'];
     final faceDetected = response['face_detected'] ?? false;
@@ -180,41 +196,38 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
       if (status == 'success' && user != null) {
         // ✅ FACE RECOGNIZED!
-        if (!_hasShownSuccess) {
-          _hasShownSuccess = true;
-          _recognizedUserName = user;
-          _statusMessage = "✔ Face recognized\nWelcome, $user";
+        _hasShownSuccess = true;
+        _recognizedUserName = user;
+        _isFaceRecognized = true;
+        _statusMessage = "✔ Face recognized\nWelcome, $user";
 
-          // Cancel any pending timers
-          _successDelayTimer?.cancel();
+        // Cancel any pending timers
+        _successDelayTimer?.cancel();
+        _reconnectionTimer?.cancel();
 
-          // Move to next phase after a delay
-          _successDelayTimer = Timer(const Duration(milliseconds: 1500), () {
-            if (mounted) {
-              _handleFaceRecognized();
-            }
-          });
-        }
+        // Move to next phase after a delay
+        _successDelayTimer = Timer(const Duration(milliseconds: 1500), () {
+          if (mounted) {
+            _handleFaceRecognized();
+          }
+        });
       } else if (status == 'fail' && faceDetected) {
         // Face detected but NOT registered
-        if (!_hasShownSuccess) {
-          _statusMessage = "❌ Face not registered\nPlease enroll first";
-        }
+        _statusMessage = "❌ Face not registered\nPlease enroll first";
       } else if (status == 'no_face' || !faceDetected) {
-        // No face detected
-        if (!_hasShownSuccess) {
+        // No face detected - only update if not already detected
+        if (!_isFaceDetected) {
           _statusMessage = "Place your face inside the frame";
         }
       } else if (status == 'processing') {
         // Still processing previous frame
-        if (!_hasShownSuccess) {
-          _statusMessage = "Processing...";
-        }
+        _statusMessage = "Processing...";
+      } else if (status == 'error') {
+        // Error occurred
+        _statusMessage = "Error: $message";
       } else {
         // Other status
-        if (!_hasShownSuccess) {
-          _statusMessage = message;
-        }
+        _statusMessage = message;
       }
     });
   }
@@ -237,8 +250,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     _controller.startImageStream((CameraImage image) {
       // Only process frames during face recognition phase
+      // ✅ And only if not already recognized
       if (_currentPhase != AttendancePhase.faceRecognition ||
-          _isFaceRecognized ||
           _hasShownSuccess ||
           !_isConnected ||
           _channel == null) {
@@ -268,6 +281,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void dispose() {
     _streamTimer?.cancel();
     _successDelayTimer?.cancel();
+    _reconnectionTimer?.cancel();
     _controller.dispose();
     _channel?.sink.close();
     super.dispose();
