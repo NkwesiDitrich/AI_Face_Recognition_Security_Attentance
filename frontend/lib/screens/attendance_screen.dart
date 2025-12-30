@@ -1,5 +1,5 @@
 // frontend/lib/screens/attendance_screen.dart
-// ✅ FIXED: Complete attendance screen with proper state management
+// ✅ COMPLETE FIXED: 3x larger frame + proper recognition flow
 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -10,7 +10,8 @@ import 'package:ai_face_attendance_frontend/utils/image_converter.dart';
 
 enum AttendancePhase {
   preparation,
-  faceRecognition,
+  faceDetection,
+  recognitionTrigger,
   livenessTransition,
   livenessDetection,
   finalResult
@@ -32,22 +33,35 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Timer? _streamTimer;
   AttendancePhase _currentPhase = AttendancePhase.preparation;
 
-  bool _isFaceRecognized = false;
-  bool _isFaceDetected = false;
-  String? _recognizedUserName;
   bool _isConnected = false;
   bool _isReconnecting = false;
   int _reconnectAttempts = 0;
-  Map<String, dynamic>? _faceCoords;
 
-  // ✅ ADDED: Track recognition state to prevent reset
+  // Face detection state
+  bool _faceDetected = false;
+  Map<String, dynamic>? _faceData;
+
+  // Frame settings - 3x LARGER (135% of screen width)
+  static const double FRAME_SIZE_RATIO = 1.35;
+
+  // Face size thresholds
+  static const double MIN_FACE_SIZE_PERCENT = 15;
+  static const double MAX_FACE_SIZE_PERCENT = 50;
+
+  // Stability detection
+  DateTime? _faceStableStartTime;
+  static const Duration STABLE_DURATION = Duration(milliseconds: 800);
+  bool _isFaceStable = false;
+
+  // Recognition state
+  bool _recognitionTriggered = false;
   bool _hasShownSuccess = false;
+  String? _recognizedUserName;
   Timer? _successDelayTimer;
   Timer? _reconnectionTimer;
 
-  // CHANGE THIS to your computer's IP address when testing on a real phone!
-  static const String _serverIp =
-      '192.168.124.202'; // Use 'localhost' or your PC IP
+  // CHANGE THIS to your computer's IP address
+  static const String _serverIp = '192.168.124.202';
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
@@ -63,8 +77,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     Timer(const Duration(seconds: 2), () {
       if (mounted) {
-        setState(() => _currentPhase = AttendancePhase.faceRecognition);
-        _statusMessage = "Place your face inside the frame";
+        setState(() {
+          _currentPhase = AttendancePhase.faceDetection;
+          _statusMessage = "Place your face inside the frame";
+        });
         _initializeCamera();
       }
     });
@@ -94,8 +110,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     if (_isReconnecting) return;
-
-    // Cancel any pending reconnection
     _reconnectionTimer?.cancel();
 
     try {
@@ -178,66 +192,123 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _processWebSocketMessage(Map<String, dynamic> response) {
     if (!mounted) return;
-
-    // ✅ Don't process if already shown success
     if (_hasShownSuccess) return;
 
     final status = response['status'];
     final faceDetected = response['face_detected'] ?? false;
     final message = response['message'] ?? "";
     final user = response['user'];
+    final face = response['face'];
 
     print(
-        "📨 WebSocket response: status=$status, face_detected=$faceDetected, user=$user");
+        "📨 WebSocket: status=$status, face_detected=$faceDetected, user=$user");
 
     setState(() {
-      _isFaceDetected = faceDetected;
-      _faceCoords = response['coords'];
+      _faceDetected = faceDetected;
+      _faceData = face != null ? Map<String, dynamic>.from(face) : null;
 
       if (status == 'success' && user != null) {
-        // ✅ FACE RECOGNIZED!
         _hasShownSuccess = true;
         _recognizedUserName = user;
-        _isFaceRecognized = true;
         _statusMessage = "✔ Face recognized\nWelcome, $user";
 
-        // Cancel any pending timers
         _successDelayTimer?.cancel();
         _reconnectionTimer?.cancel();
 
-        // Move to next phase after a delay
         _successDelayTimer = Timer(const Duration(milliseconds: 1500), () {
           if (mounted) {
             _handleFaceRecognized();
           }
         });
       } else if (status == 'fail' && faceDetected) {
-        // Face detected but NOT registered
         _statusMessage = "❌ Face not registered\nPlease enroll first";
+        _faceStableStartTime = null;
+        _isFaceStable = false;
+        _recognitionTriggered = false;
+      } else if (status == 'face_detected') {
+        _handleFaceDetection(face);
       } else if (status == 'no_face' || !faceDetected) {
-        // No face detected - only update if not already detected
-        if (!_isFaceDetected) {
-          _statusMessage = "Place your face inside the frame";
-        }
+        _faceData = null;
+        _faceStableStartTime = null;
+        _isFaceStable = false;
+        _recognitionTriggered = false;
+        _statusMessage = "Place your face inside the frame";
       } else if (status == 'processing') {
-        // Still processing previous frame
         _statusMessage = "Processing...";
       } else if (status == 'error') {
-        // Error occurred
         _statusMessage = "Error: $message";
       } else {
-        // Other status
         _statusMessage = message;
       }
     });
   }
 
+  void _handleFaceDetection(Map<String, dynamic>? faceData) {
+    if (faceData == null) {
+      _statusMessage = "Place your face inside the frame";
+      return;
+    }
+
+    final faceX = faceData['x'] ?? 0;
+    final faceY = faceData['y'] ?? 0;
+    final faceW = faceData['w'] ?? 0;
+    final faceH = faceData['h'] ?? 0;
+    final faceSize = faceData['size_percent'] ?? 0;
+
+    final frameLeft = (1.0 - FRAME_SIZE_RATIO) / 2;
+    final frameRight = frameLeft + FRAME_SIZE_RATIO;
+    final frameTop = (1.0 - FRAME_SIZE_RATIO) / 2;
+    final frameBottom = frameTop + FRAME_SIZE_RATIO;
+
+    final faceInsideFrame = faceX >= frameLeft &&
+        faceX + faceW <= frameRight &&
+        faceY >= frameTop &&
+        faceY + faceH <= frameBottom;
+
+    final faceTooSmall = faceSize < MIN_FACE_SIZE_PERCENT;
+    final faceTooBig = faceSize > MAX_FACE_SIZE_PERCENT;
+
+    if (!faceInsideFrame) {
+      _statusMessage = "Center your face";
+      _faceStableStartTime = null;
+      _isFaceStable = false;
+      _recognitionTriggered = false;
+    } else if (faceTooSmall) {
+      _statusMessage = "Move closer";
+      _faceStableStartTime = null;
+      _isFaceStable = false;
+      _recognitionTriggered = false;
+    } else if (faceTooBig) {
+      _statusMessage = "Move back";
+      _faceStableStartTime = null;
+      _isFaceStable = false;
+      _recognitionTriggered = false;
+    } else {
+      if (_faceStableStartTime == null) {
+        _faceStableStartTime = DateTime.now();
+        _statusMessage = "Hold still...";
+      } else {
+        final DateTime stableStart = _faceStableStartTime!;
+        final elapsed = DateTime.now().difference(stableStart);
+        if (elapsed >= STABLE_DURATION) {
+          if (!_recognitionTriggered) {
+            _recognitionTriggered = true;
+            _isFaceStable = true;
+            _statusMessage = "🔄 Recognizing...";
+          }
+        } else {
+          final remaining = (STABLE_DURATION - elapsed).inMilliseconds;
+          _statusMessage =
+              "Hold still... ${(remaining / 1000).toStringAsFixed(1)}s";
+        }
+      }
+    }
+  }
+
   void _handleFaceRecognized() {
     if (!mounted) return;
-
     setState(() => _currentPhase = AttendancePhase.livenessTransition);
 
-    // Show transition screen
     Timer(const Duration(seconds: 1), () {
       if (mounted) {
         setState(() => _currentPhase = AttendancePhase.livenessDetection);
@@ -249,16 +320,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (!_controller.value.isInitialized) return;
 
     _controller.startImageStream((CameraImage image) {
-      // Only process frames during face recognition phase
-      // ✅ And only if not already recognized
-      if (_currentPhase != AttendancePhase.faceRecognition ||
+      if (_currentPhase != AttendancePhase.faceDetection ||
           _hasShownSuccess ||
+          _recognitionTriggered ||
           !_isConnected ||
           _channel == null) {
         return;
       }
 
-      // Rate limiting: process one frame every 500ms
       if (_streamTimer != null && _streamTimer!.isActive) {
         return;
       }
@@ -305,9 +374,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return _buildTransitionUI();
       case AttendancePhase.livenessDetection:
         return _buildLivenessUI();
-      case AttendancePhase.faceRecognition:
+      case AttendancePhase.faceDetection:
       default:
-        return _buildRecognitionUI();
+        return _buildFaceDetectionUI();
     }
   }
 
@@ -333,28 +402,89 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     );
   }
 
-  Widget _buildRecognitionUI() {
+  Widget _buildFaceDetectionUI() {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    final frameSize = screenWidth * FRAME_SIZE_RATIO;
+
+    final frameLeft = (screenWidth - frameSize) / 2;
+    final frameTop = (screenHeight - frameSize) / 2;
+
+    Color frameColor;
+    if (_recognitionTriggered) {
+      frameColor = Colors.blue;
+    } else if (_isFaceStable) {
+      frameColor = Colors.green;
+    } else if (_faceDetected) {
+      frameColor = Colors.orange;
+    } else {
+      frameColor = Colors.white;
+    }
+
     return Stack(
       children: [
-        // Camera preview
         SizedBox.expand(
           child: CameraPreview(_controller),
         ),
 
-        // Face frame overlay
-        if (_faceCoords != null)
-          Positioned(
-            left: _faceCoords!['x'] * MediaQuery.of(context).size.width,
-            top: _faceCoords!['y'] * MediaQuery.of(context).size.height,
-            width: _faceCoords!['w'] * MediaQuery.of(context).size.width,
-            height: _faceCoords!['h'] * MediaQuery.of(context).size.height,
+        // 3x LARGER GUIDE FRAME (135% of screen width)
+        Positioned(
+          left: frameLeft,
+          top: frameTop,
+          child: Container(
+            width: frameSize,
+            height: frameSize,
+            decoration: BoxDecoration(
+              border: Border.all(color: frameColor, width: 4),
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: Stack(
+              children: [
+                _buildCornerMarker(frameColor, true, true),
+                _buildCornerMarker(frameColor, true, false),
+                _buildCornerMarker(frameColor, false, true),
+                _buildCornerMarker(frameColor, false, false),
+                if (!_faceDetected)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 15, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        "Put your face here",
+                        style: TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+
+        // Size indicator
+        Positioned(
+          top: frameTop - 60,
+          left: 0,
+          right: 0,
+          child: Center(
             child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
               decoration: BoxDecoration(
-                border: Border.all(color: Colors.green, width: 3),
-                borderRadius: BorderRadius.circular(10),
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                _faceDetected
+                    ? "Face size: ${_faceData?['size_percent']?.toStringAsFixed(0) ?? 0}%"
+                    : "Frame: ${(FRAME_SIZE_RATIO * 100).toStringAsFixed(0)}% of screen",
+                style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ),
           ),
+        ),
 
         // Status overlay
         Positioned(
@@ -375,6 +505,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 18,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -399,6 +530,33 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildCornerMarker(Color color, bool isTop, bool isLeft) {
+    final width = isTop ? 40 : 30;
+    final height = isTop ? 30 : 40;
+
+    return Positioned(
+      top: isTop ? -4 : null,
+      bottom: isTop ? null : -4,
+      left: isLeft ? -4 : null,
+      right: isLeft ? null : -4,
+      child: Container(
+        width: width.toDouble(),
+        height: height.toDouble(),
+        decoration: BoxDecoration(
+          border: Border(
+            top: isTop ? BorderSide(color: color, width: 6) : BorderSide.none,
+            bottom:
+                isTop ? BorderSide.none : BorderSide(color: color, width: 6),
+            left: isLeft ? BorderSide(color: color, width: 6) : BorderSide.none,
+            right:
+                isLeft ? BorderSide.none : BorderSide(color: color, width: 6),
+          ),
+          borderRadius: BorderRadius.circular(10),
+        ),
+      ),
     );
   }
 
