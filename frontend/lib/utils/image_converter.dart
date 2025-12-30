@@ -57,5 +57,5 @@ Uint8List? convertYUV420toImage(CameraImage cameraImage) {
   }
 
   // Encode the image to JPEG format
-  return Uint8List.fromList(img.encodeJpg(image, quality: 80));
+  return Uint8List.fromList(img.encodeJpg(image, quality: 100));
 }
