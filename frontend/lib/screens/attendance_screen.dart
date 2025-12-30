@@ -41,7 +41,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   String? _recognizedUserId;
 
   // CHANGE THIS to your computer's IP address
-  static const String _serverIp = '192.168.106.202';
+  static const String _serverIp = '192.168.156.202';
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
@@ -169,7 +169,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _faceDetected = faceDetected;
 
-      if (status == 'recognized') {
+      if (status == 'success') {
         _isRecognized = true;
         _recognizedUserName = name;
         _recognizedUserId = userId;
@@ -182,9 +182,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           }
         });
       } else if (status == 'no_face') {
-        _statusMessage = "Face not detected";
+        _statusMessage = "Place your face inside the frame";
       } else if (status == 'not_recognized') {
-        _statusMessage = "Face detected! But not registered";
+        _statusMessage = "Face detected but not registered";
       } else if (status == 'processing') {
         // Keep current message
       } else {
@@ -223,7 +223,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      _streamTimer = Timer(const Duration(milliseconds: 500), () {
+      _streamTimer = Timer(const Duration(milliseconds: 300), () {
         try {
           final bytes = convertYUV420toImage(image);
           if (bytes != null && _isConnected && _channel != null) {
@@ -248,6 +248,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: _currentPhase == AttendancePhase.phase1
+          ? AppBar(title: const Text("Real-time Attendance"), elevation: 0)
+          : null,
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 500),
         child: _buildCurrentUI(),
@@ -295,98 +298,104 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    Color frameColor = Colors.white;
+    Color frameColor = Colors.blue;
     if (_isRecognized) {
       frameColor = Colors.green;
-    } else if (_statusMessage == "Face detected! But not registered") {
+    } else if (_statusMessage == "Face detected but not registered") {
       frameColor = Colors.red;
     } else if (_faceDetected) {
       frameColor = Colors.orange;
     }
 
-    return Stack(
+    return SingleChildScrollView(
       key: const ValueKey("phase1"),
-      children: [
-        SizedBox.expand(child: CameraPreview(_controller)),
-
-        // Fixed Guide Frame
-        Center(
-          child: Container(
-            width: 280,
-            height: 280,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // =====================================================
+          // CAMERA PREVIEW SECTION (EXACT MATCH WITH ENROLLMENT)
+          // =====================================================
+          Container(
             decoration: BoxDecoration(
               border: Border.all(
                 color: frameColor,
-                width: 4,
+                width: 2,
               ),
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: SizedBox(
+                height: 300, // Exact height from enrollment_screen.dart
+                child: Stack(
+                  fit: StackFit.expand, // Ensure children fill the box
+                  children: [
+                    CameraPreview(_controller),
+                    if (_isRecognized)
+                      Container(
+                        color: Colors.green.withOpacity(0.3),
+                        child: const Center(
+                          child: Icon(Icons.check_circle,
+                              color: Colors.white, size: 80),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
 
-        // Live Messages
-        Positioned(
-          bottom: 100,
-          left: 0,
-          right: 0,
-          child: Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(10),
+          const SizedBox(height: 20),
+
+          // =====================================================
+          // STATUS MESSAGE SECTION
+          // =====================================================
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: frameColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: frameColor.withOpacity(0.3),
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_faceDetected &&
-                      !_isRecognized &&
-                      _statusMessage != "Face detected! But not registered")
-                    const Text(
-                      "Face Detected! Hold still...",
-                      style: TextStyle(
-                          color: Colors.orange,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold),
-                    ),
-                  Text(
-                    _statusMessage,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
+            ),
+            child: Column(
+              children: [
+                if (_faceDetected && !_isRecognized)
+                  const Text(
+                    "Face Detected! Hold still...",
+                    style: TextStyle(
+                        color: Colors.orange,
+                        fontSize: 16,
                         fontWeight: FontWeight.bold),
                   ),
-                ],
-              ),
-            ),
-          ),
-        ),
-
-        // Success Overlay
-        if (_isRecognized)
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.8),
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.check_circle, color: Colors.white, size: 60),
+                const SizedBox(height: 8),
+                Text(
+                  _statusMessage,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: frameColor == Colors.blue
+                          ? Colors.black87
+                          : frameColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold),
+                ),
+                if (_isRecognized) ...[
                   const SizedBox(height: 10),
-                  Text("✔ Face recognized\nWelcome, $_recognizedUserName",
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold)),
-                ],
-              ),
+                  Text(
+                    "Welcome, $_recognizedUserName",
+                    style: const TextStyle(
+                        color: Colors.green,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ]
+              ],
             ),
           ),
-      ],
+        ],
+      ),
     );
   }
 
