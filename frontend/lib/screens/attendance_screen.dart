@@ -32,6 +32,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         enableLandmarks: true, performanceMode: FaceDetectorMode.fast),
   );
 
+  // ✅ CRITICAL: Use SAME resolution as enrollment for consistent embeddings!
+  // Enrollment uses ResolutionPreset.high, so attendance must also use high
+  ResolutionPreset get _cameraResolution => ResolutionPreset.high;
+
   DateTime? _faceFirstDetectedAt;
   bool _isSendingFrame = false;
 
@@ -64,7 +68,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     final front = widget.cameras
         .firstWhere((c) => c.lensDirection == CameraLensDirection.front);
     _controller =
-        CameraController(front, ResolutionPreset.medium, enableAudio: false);
+        CameraController(front, _cameraResolution, enableAudio: false);
     await _controller!.initialize();
     if (mounted) {
       setState(() {});
