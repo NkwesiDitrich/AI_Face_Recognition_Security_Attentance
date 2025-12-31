@@ -41,7 +41,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   String? _recognizedUserId;
 
   // CHANGE THIS to your computer's IP address
-  static const String _serverIp = '192.168.156.202';
+  static const String _serverIp = '192.168.20.202';
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
 
   @override
