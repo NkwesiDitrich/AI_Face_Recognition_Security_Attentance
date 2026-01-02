@@ -15,13 +15,18 @@ class AttendanceLog(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     # Type of event (e.g., 'check_in', 'check_out')
-    event_type: str = Field(...)
+    # Default: 'check_in' for attendance system
+    event_type: str = Field(default="check_in")
 
     # Status of the liveness check
-    liveness_status: str = Field(default="pending")
+    # Values: "pending", "passed", "failed"
+    liveness: str = Field(default="pending")
+
+    # Legacy field name (for backward compatibility)
+    @property
+    def liveness_status(self) -> str:
+        return self.liveness
 
     class Config:
-        # Allows the model to be created from MongoDB documents with '_id'
         populate_by_name = True
-        # Custom JSON encoder to convert datetime to ISO string
         json_encoders = {datetime: lambda dt: dt.isoformat()}
