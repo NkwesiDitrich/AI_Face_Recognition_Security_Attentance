@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'dart:math';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
 
 enum AttendancePhase { phase0, phase1, success, fail, liveness, finalSuccess }
 
@@ -29,16 +30,25 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _faceDetected = false;
   String? _recognizedUserName;
   String? _recognizedUserId;
+  String? _livenessSessionId;
+
+  bool _isImageStreamRunning = false;
 
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
         enableLandmarks: true,
         enableClassification: true,
+        enableContours: true, // CRITICAL for mouth open detection
         performanceMode: FaceDetectorMode.fast),
   );
 
   DateTime? _faceFirstDetectedAt;
   bool _isSendingFrame = false;
+  bool _isProcessingStream = false;
+  Timer? _detectionTimer;
+
+  // FIX: Frame throttling variable
+  DateTime _lastLivenessProcess = DateTime.now();
 
   // Liveness State
   List<Map<String, String>> _livenessSequence = [];
@@ -51,7 +61,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   DateTime? _expressionStartTime;
 
   // UPDATE THIS to your computer's IP address
-  static const String _serverIp = '192.168.165.202';
+  static const String _serverIp = '192.168.74.202';
   static const String _wsUrl = 'ws://$_serverIp:8000/api/v1/ws/attendance';
   static const String _recordUrl = 'http://$_serverIp:8000/api/v1/record';
 
@@ -65,6 +75,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _currentPhase = AttendancePhase.phase0;
       _statusMessage = "Step 1 of 2 – Face Recognition";
+      _livenessSessionId = DateTime.now().millisecondsSinceEpoch.toString();
     });
     Timer(const Duration(seconds: 2), () {
       if (mounted) _startPhase1();
@@ -83,12 +94,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Future<void> _initializeCamera() async {
     final front = widget.cameras
         .firstWhere((c) => c.lensDirection == CameraLensDirection.front);
-    _controller =
-        CameraController(front, ResolutionPreset.high, enableAudio: false);
+    _controller = CameraController(front, ResolutionPreset.high,
+        enableAudio: false, imageFormatGroup: ImageFormatGroup.yuv420);
     await _controller!.initialize();
     if (mounted) {
       setState(() {});
-      _startDetectionLoop();
+      _startRecognitionLoop();
     }
   }
 
@@ -98,153 +109,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
 
-  void _startDetectionLoop() {
-    Timer.periodic(const Duration(milliseconds: 200), (timer) async {
-      if (!mounted || _isSendingFrame) return;
-      if (_currentPhase == AttendancePhase.phase1) {
-        await _handleRecognitionDetection();
-      } else if (_currentPhase == AttendancePhase.liveness) {
-        await _handleLivenessDetection();
-      }
-    });
-  }
-
-  Future<void> _handleRecognitionDetection() async {
-    try {
-      final XFile photo = await _controller!.takePicture();
-      final List<Face> faces =
-          await _faceDetector.processImage(InputImage.fromFilePath(photo.path));
-      if (faces.isEmpty) {
-        _resetDetection();
-        await File(photo.path).delete();
-        return;
-      }
-      final face = faces.first;
-      if (face.boundingBox.width < 120) {
-        setState(() {
-          _faceDetected = true;
-          _statusMessage = "Come closer to the camera";
-        });
-        await File(photo.path).delete();
-        return;
-      }
-      if (_faceFirstDetectedAt == null) {
-        _faceFirstDetectedAt = DateTime.now();
-        setState(() {
-          _faceDetected = true;
-          _statusMessage = "Hold still...";
-        });
-      } else if (DateTime.now()
-              .difference(_faceFirstDetectedAt!)
-              .inMilliseconds >=
-          300) {
-        _sendFrameToBackend(photo);
-      }
-    } catch (e) {
-      debugPrint("Detection Error: $e");
-    }
-  }
-
-  Future<void> _handleLivenessDetection() async {
-    if (_livenessPassed) return;
-    try {
-      final XFile photo = await _controller!.takePicture();
-      final List<Face> faces =
-          await _faceDetector.processImage(InputImage.fromFilePath(photo.path));
-      await File(photo.path).delete();
-      if (faces.isEmpty) {
-        setState(() {
-          _statusMessage = "Face lost, return to frame";
-          _expressionStartTime = null;
-        });
-        return;
-      }
-
-      final face = faces.first;
-      bool matched = false;
-
-      switch (_currentEmoji) {
-        case "😊": // Smile
-          if ((face.smilingProbability ?? 0) > 0.60) matched = true;
-          break;
-        case "😐": // Neutral
-          if ((face.smilingProbability ?? 0) < 0.2) matched = true;
-          break;
-        case "😠": // Angry
-          if ((face.smilingProbability ?? 0) < 0.1) matched = true;
-          break;
-        case "😮": // Surprise (Mouth Open)
-          final bottomMouth =
-              face.landmarks[FaceLandmarkType.bottomMouth]?.position;
-          final noseBase = face.landmarks[FaceLandmarkType.noseBase]?.position;
-          if (bottomMouth != null && noseBase != null) {
-            final mouthHeight = (bottomMouth.y - noseBase.y).abs();
-            if (mouthHeight > 15) matched = true; // Threshold for open mouth
-          }
-          break;
-      }
-
-      if (matched) {
-        if (_expressionStartTime == null) {
-          _expressionStartTime = DateTime.now();
-        } else if (DateTime.now()
-                .difference(_expressionStartTime!)
-                .inMilliseconds >=
-            500) {
-          _onStepSuccess();
+  void _startRecognitionLoop() {
+    _detectionTimer?.cancel();
+    _detectionTimer =
+        Timer.periodic(const Duration(milliseconds: 500), (timer) async {
+      if (!mounted ||
+          _currentPhase != AttendancePhase.phase1 ||
+          _isSendingFrame) return;
+      try {
+        final XFile photo = await _controller!.takePicture();
+        final List<Face> faces = await _faceDetector
+            .processImage(InputImage.fromFilePath(photo.path));
+        if (faces.isEmpty) {
+          _resetDetection();
+          await File(photo.path).delete();
+          return;
         }
-      } else {
-        _expressionStartTime = null;
+        final face = faces.first;
+        if (face.boundingBox.width < 120) {
+          setState(() {
+            _faceDetected = true;
+            _statusMessage = "Come closer to the camera";
+          });
+          await File(photo.path).delete();
+          return;
+        }
+        if (_faceFirstDetectedAt == null) {
+          _faceFirstDetectedAt = DateTime.now();
+          setState(() {
+            _faceDetected = true;
+            _statusMessage = "Hold still...";
+          });
+        } else if (DateTime.now()
+                .difference(_faceFirstDetectedAt!)
+                .inMilliseconds >=
+            300) {
+          _sendFrameToBackend(photo);
+        }
+      } catch (e) {
+        debugPrint("Recognition Error: $e");
       }
-    } catch (e) {
-      debugPrint("Liveness Error: $e");
-    }
-  }
-
-  void _onStepSuccess() {
-    _expressionStartTime = null;
-    if (_currentLivenessStep < _livenessSequence.length - 1) {
-      setState(() {
-        _currentLivenessStep++;
-        _currentEmoji = _livenessSequence[_currentLivenessStep]["emoji"]!;
-        _livenessInstruction =
-            _livenessSequence[_currentLivenessStep]["instruction"]!;
-        _livenessTimer = 5;
-      });
-    } else {
-      _onLivenessSuccess();
-    }
-  }
-
-  void _onLivenessSuccess() {
-    _livenessPassed = true;
-    _livenessCountdownTimer?.cancel();
-    setState(() {
-      _statusMessage = "✔ Liveness detection completed";
     });
-    _recordAttendance();
-  }
-
-  Future<void> _recordAttendance() async {
-    try {
-      final response = await http.post(
-        Uri.parse(_recordUrl),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "user_id": _recognizedUserId,
-          "liveness": "passed",
-          "event_type": "check_in"
-        }),
-      );
-      if (response.statusCode == 200) {
-        setState(() {
-          _currentPhase = AttendancePhase.finalSuccess;
-          _statusMessage = "Access Granted";
-        });
-      }
-    } catch (e) {
-      debugPrint("Record Error: $e");
-    }
   }
 
   void _resetDetection() {
@@ -269,7 +174,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _processBackendResponse(Map<String, dynamic> res) {
     if (!mounted) return;
+    _isSendingFrame = false;
     if (res['status'] == 'recognized') {
+      _detectionTimer?.cancel();
       setState(() {
         _currentPhase = AttendancePhase.success;
         _isRecognized = true;
@@ -284,19 +191,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       setState(() {
         _currentPhase = AttendancePhase.fail;
         _statusMessage = "Face not registered";
+        _faceFirstDetectedAt = null;
       });
       Timer(const Duration(seconds: 2), () {
         if (mounted)
           setState(() {
             _currentPhase = AttendancePhase.phase1;
-            _isSendingFrame = false;
-            _faceFirstDetectedAt = null;
           });
       });
     }
   }
 
-  void _startLivenessPhase() {
+  void _startLivenessPhase() async {
+    // FIX: Reset camera pipeline to fix takePicture conflict
+    await _controller?.pausePreview();
+    await Future.delayed(const Duration(milliseconds: 200));
+    await _controller?.resumePreview();
+
     final allOptions = [
       {"emoji": "😊", "instruction": "Please smile"},
       {"emoji": "😐", "instruction": "Keep a neutral expression"},
@@ -305,7 +216,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     ];
     allOptions.shuffle();
     _livenessSequence = allOptions.take(2).toList();
-
     setState(() {
       _currentPhase = AttendancePhase.liveness;
       _currentLivenessStep = 0;
@@ -315,7 +225,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _livenessPassed = false;
       _expressionStartTime = null;
     });
-
     _livenessCountdownTimer?.cancel();
     _livenessCountdownTimer =
         Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -328,24 +237,197 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         if (!_livenessPassed) _onLivenessFailed();
       }
     });
+
+    if (!_isImageStreamRunning) {
+      _controller!.startImageStream(_processLivenessFrame);
+      _isImageStreamRunning = true;
+    }
+  }
+
+  void _processLivenessFrame(CameraImage image) async {
+    if (_livenessPassed ||
+        _isProcessingStream ||
+        _currentPhase != AttendancePhase.liveness) return;
+
+    // ✅ FRAME THROTTLING (CRITICAL)
+    if (DateTime.now().difference(_lastLivenessProcess).inMilliseconds < 180)
+      return;
+    _lastLivenessProcess = DateTime.now();
+
+    _isProcessingStream = true;
+    try {
+      final inputImage = _convertCameraImage(image);
+      if (inputImage != null) {
+        final List<Face> faces = await _faceDetector.processImage(inputImage);
+
+        // ✅ SINGLE FACE ENFORCEMENT
+        if (faces.length != 1) {
+          setState(() {
+            _statusMessage = faces.isEmpty
+                ? "Face lost, return to frame"
+                : "Multiple faces detected";
+            _expressionStartTime = null;
+          });
+          _isProcessingStream = false;
+          return;
+        }
+
+        _evaluateExpression(faces.first);
+      }
+    } catch (e) {
+      debugPrint("Liveness Frame Error: $e");
+    }
+    _isProcessingStream = false;
+  }
+
+  void _evaluateExpression(Face face) {
+    bool matched = false;
+    debugPrint(
+        "Smile: ${face.smilingProbability}, LeftEye: ${face.leftEyeOpenProbability}, RightEye: ${face.rightEyeOpenProbability}");
+
+    switch (_currentEmoji) {
+      case "😊":
+        // FIX: Relaxed smile threshold for live video
+        matched = (face.smilingProbability ?? 0) > 0.35;
+        break;
+      case "😐":
+        matched = (face.smilingProbability ?? 0) < 0.30;
+        break;
+      case "😠":
+        matched = (face.smilingProbability ?? 0) < 0.25;
+        break;
+      case "😮":
+        final upperLip = face.contours[FaceContourType.upperLipBottom]?.points;
+        final lowerLip = face.contours[FaceContourType.lowerLipTop]?.points;
+        if (upperLip != null &&
+            lowerLip != null &&
+            upperLip.isNotEmpty &&
+            lowerLip.isNotEmpty) {
+          final upY = upperLip[upperLip.length ~/ 2].y;
+          final lowY = lowerLip[lowerLip.length ~/ 2].y;
+          // FIX: Scale-aware threshold
+          final faceHeight = face.boundingBox.height;
+          matched = ((lowY - upY).abs() / faceHeight) > 0.08;
+        }
+        break;
+    }
+    if (matched) {
+      _expressionStartTime ??= DateTime.now();
+      if (DateTime.now().difference(_expressionStartTime!).inMilliseconds >=
+          650) {
+        _onStepSuccess();
+      }
+    } else {
+      _expressionStartTime = null;
+    }
+  }
+
+  void _onStepSuccess() {
+    _expressionStartTime = null;
+    if (_currentLivenessStep < _livenessSequence.length - 1) {
+      setState(() {
+        _currentLivenessStep++;
+        _currentEmoji = _livenessSequence[_currentLivenessStep]["emoji"]!;
+        _livenessInstruction =
+            _livenessSequence[_currentLivenessStep]["instruction"]!;
+        _livenessTimer = 5;
+      });
+    } else {
+      _onLivenessSuccess();
+    }
+  }
+
+  void _onLivenessSuccess() {
+    _livenessPassed = true;
+    _livenessCountdownTimer?.cancel();
+
+    if (_isImageStreamRunning) {
+      _controller?.stopImageStream();
+      _isImageStreamRunning = false;
+    }
+
+    setState(() {
+      _statusMessage = "✔ Liveness detection completed";
+    });
+    _recordAttendance();
+  }
+
+  Future<void> _recordAttendance() async {
+    try {
+      final response = await http.post(
+        Uri.parse(_recordUrl),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_id": _recognizedUserId,
+          "liveness": "passed",
+          "event_type": "check_in",
+          "session_id": _livenessSessionId
+        }),
+      );
+      if (response.statusCode == 200) {
+        setState(() {
+          _currentPhase = AttendancePhase.finalSuccess;
+          _statusMessage = "Access Granted";
+        });
+      }
+    } catch (e) {
+      debugPrint("Record Error: $e");
+    }
   }
 
   void _onLivenessFailed() {
+    if (_isImageStreamRunning) {
+      _controller?.stopImageStream();
+      _isImageStreamRunning = false;
+    }
     setState(() {
       _currentPhase = AttendancePhase.fail;
       _statusMessage = "Liveness check failed. Retrying...";
+      _isRecognized = false;
     });
 
-    // FIXED: Instead of resetting to Phase 1, restart liveness if user is still there
     Timer(const Duration(seconds: 2), () {
-      if (mounted) {
-        if (_isRecognized) {
-          _startLivenessPhase(); // Restart liveness challenge
-        } else {
-          _startPhase1(); // Go back to recognition if user left
-        }
-      }
+      if (mounted) _startPhase1();
     });
+  }
+
+  InputImage? _convertCameraImage(CameraImage image) {
+    final WriteBuffer allBytes = WriteBuffer();
+    for (final Plane plane in image.planes) {
+      allBytes.putUint8List(plane.bytes);
+    }
+    final bytes = allBytes.done().buffer.asUint8List();
+
+    // ✅ CORRECT rotation handling
+    final camera = _controller!.description;
+    final rotation = camera.sensorOrientation;
+    InputImageRotation imageRotation;
+    switch (rotation) {
+      case 0:
+        imageRotation = InputImageRotation.rotation0deg;
+        break;
+      case 90:
+        imageRotation = InputImageRotation.rotation90deg;
+        break;
+      case 180:
+        imageRotation = InputImageRotation.rotation180deg;
+        break;
+      case 270:
+        imageRotation = InputImageRotation.rotation270deg;
+        break;
+      default:
+        imageRotation = InputImageRotation.rotation90deg;
+    }
+
+    final inputImageFormat =
+        InputImageFormatValue.fromRawValue(image.format.raw) ??
+            InputImageFormat.yuv420;
+    final metadata = InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: imageRotation,
+        format: inputImageFormat,
+        bytesPerRow: image.planes[0].bytesPerRow);
+    return InputImage.fromBytes(bytes: bytes, metadata: metadata);
   }
 
   @override
@@ -357,16 +439,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildCurrentUI() {
-    switch (_currentPhase) {
-      case AttendancePhase.phase0:
-        return _buildPhase0UI();
-      case AttendancePhase.liveness:
-        return _buildLivenessUI();
-      case AttendancePhase.finalSuccess:
-        return _buildFinalSuccessUI();
-      default:
-        return _buildRecognitionUI();
-    }
+    if (_currentPhase == AttendancePhase.phase0) return _buildPhase0UI();
+    if (_currentPhase == AttendancePhase.liveness) return _buildLivenessUI();
+    if (_currentPhase == AttendancePhase.finalSuccess)
+      return _buildFinalSuccessUI();
+    return _buildRecognitionUI();
   }
 
   Widget _buildPhase0UI() => Container(
@@ -498,6 +575,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   @override
   void dispose() {
+    _detectionTimer?.cancel();
     _faceDetector.close();
     _controller?.dispose();
     _channel?.sink.close();
