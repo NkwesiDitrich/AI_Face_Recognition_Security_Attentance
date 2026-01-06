@@ -9,7 +9,6 @@ import 'dart:typed_data';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:http/http.dart' as http;
 
-// Added 'transition' phase for Step 2 announcement
 enum AttendancePhase {
   phase0,
   phase1,
@@ -48,19 +47,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   String? _recognizedUserName;
   String? _recognizedUserId;
 
-  // Face Detector with Contours enabled for precise mouth detection
+  // EXACT SAME FaceDetector as Step 1
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
       enableClassification: true,
       enableLandmarks: true,
-      enableContours: true,
-      performanceMode: FaceDetectorMode.accurate,
+      performanceMode: FaceDetectorMode.fast,
     ),
   );
 
   ResolutionPreset get _cameraResolution => ResolutionPreset.high;
   DateTime? _faceFirstDetectedAt;
   bool _isSendingFrame = false;
+  bool _isProcessing = false; // ✅ NEW: Lock to prevent camera choking
 
   LivenessChallenge? _currentChallenge;
   int _attempts = 0;
@@ -68,6 +67,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Timer? _livenessTimer;
   int _livenessSecondsRemaining = 5;
   bool _livenessPassed = false;
+  bool _livenessFaceDetected = false;
 
   @override
   void initState() {
@@ -75,7 +75,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _startPhase0();
   }
 
-  // PHASE 0: Entry Animation
   void _startPhase0() {
     setState(() {
       _currentPhase = AttendancePhase.phase0;
@@ -86,13 +85,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
-  // PHASE 1: Recognition Setup
   void _startPhase1() async {
     setState(() {
       _currentPhase = AttendancePhase.phase1;
       _statusMessage = "Place your face inside the frame";
       _isRecognized = false;
       _isSendingFrame = false;
+      _isProcessing = false;
       _faceFirstDetectedAt = null;
       _attempts = 0;
     });
@@ -115,14 +114,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.221.202:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.137.1:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
 
   void _startDetectionLoop() {
     Timer.periodic(const Duration(milliseconds: 200), (timer) async {
-      if (!mounted || _isSendingFrame) return;
+      if (!mounted || _isSendingFrame || _isProcessing) return;
 
       if (_currentPhase == AttendancePhase.phase1) {
         await _handleRecognitionDetection();
@@ -132,9 +131,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
+  // STEP 1 LOGIC (Untouched)
   Future<void> _handleRecognitionDetection() async {
     try {
       if (_controller == null || !_controller!.value.isInitialized) return;
+      _isProcessing = true;
       final XFile photo = await _controller!.takePicture();
       final List<Face> faces =
           await _faceDetector.processImage(InputImage.fromFilePath(photo.path));
@@ -142,6 +143,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       if (faces.isEmpty) {
         _resetDetection();
         await File(photo.path).delete();
+        _isProcessing = false;
         return;
       }
 
@@ -154,6 +156,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           _statusMessage = "Come closer";
         });
         await File(photo.path).delete();
+        _isProcessing = false;
         return;
       }
 
@@ -169,8 +172,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           300) {
         _sendFrameToBackend(photo);
       }
+      _isProcessing = false;
     } catch (e) {
       debugPrint("Detection Error: $e");
+      _isProcessing = false;
     }
   }
 
@@ -204,7 +209,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         _recognizedUserId = res['user']['id'];
         _statusMessage = "✔ Face recognized";
       });
-      // Transition to Step 2 after 1 second
       Timer(const Duration(seconds: 1), () {
         if (mounted) _startTransitionPhase();
       });
@@ -224,7 +228,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
   }
 
-  // PHASE 2: Transition Animation
   void _startTransitionPhase() {
     setState(() {
       _currentPhase = AttendancePhase.transition;
@@ -235,7 +238,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
-  // PHASE 3: Liveness Detection
   void _startLivenessPhase() {
     if (_attempts >= _maxAttempts) {
       _showFinalFailure("Liveness check failed. Please try again.");
@@ -245,6 +247,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _attempts++;
     _livenessSecondsRemaining = 5;
     _livenessPassed = false;
+    _livenessFaceDetected = false;
 
     final challenges = [
       LivenessChallenge(
@@ -274,6 +277,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _livenessTimer?.cancel();
     _livenessTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) return;
+
+      // ✅ Timer only counts down if a face is detected (Paused Timer)
+      if (!_livenessFaceDetected) return;
+
       setState(() {
         if (_livenessSecondsRemaining > 0) {
           _livenessSecondsRemaining--;
@@ -285,50 +292,80 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
+  // ✅ CHEAT: Using the EXACT same detection logic as Step 1
   Future<void> _handleLivenessDetection() async {
-    if (_livenessPassed) return;
+    if (_livenessPassed || _isProcessing) return;
 
     try {
+      if (_controller == null || !_controller!.value.isInitialized) return;
+      _isProcessing = true; // Prevent overlapping calls
       final XFile photo = await _controller!.takePicture();
       final List<Face> faces =
           await _faceDetector.processImage(InputImage.fromFilePath(photo.path));
-      await File(photo.path).delete();
 
-      if (faces.isEmpty) return;
+      // 1. Face Detection Foundation (Same as Step 1)
+      if (faces.isEmpty) {
+        if (mounted)
+          setState(() {
+            _livenessFaceDetected = false;
+          });
+        await File(photo.path).delete();
+        _isProcessing = false;
+        return;
+      }
 
       final face = faces.first;
+      final rect = face.boundingBox;
+
+      // 2. Quality Gate (Same as Step 1)
+      if (rect.width < 120 || rect.height < 120) {
+        if (mounted)
+          setState(() {
+            _livenessFaceDetected = true;
+            _statusMessage = "Come closer";
+          });
+        await File(photo.path).delete();
+        _isProcessing = false;
+        return;
+      }
+
+      // 3. Face is detected and quality is good
+      if (mounted)
+        setState(() {
+          _livenessFaceDetected = true;
+          _statusMessage = _currentChallenge!.instruction;
+        });
+
       bool success = false;
 
+      // 4. Liveness Logic
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
-          if ((face.smilingProbability ?? 0) > 0.7) success = true;
+          if ((face.smilingProbability ?? 0) > 0.6) success = true;
           break;
         case ChallengeType.blink:
-          if ((face.leftEyeOpenProbability ?? 1.0) < 0.2 &&
-              (face.rightEyeOpenProbability ?? 1.0) < 0.2) success = true;
+          if ((face.leftEyeOpenProbability ?? 1.0) < 0.25 &&
+              (face.rightEyeOpenProbability ?? 1.0) < 0.25) success = true;
           break;
         case ChallengeType.neutral:
           if ((face.smilingProbability ?? 1.0) < 0.2 &&
-              (face.leftEyeOpenProbability ?? 0) > 0.8) success = true;
+              (face.leftEyeOpenProbability ?? 0) > 0.7) success = true;
           break;
         case ChallengeType.mouthOpen:
-          // Precise Mouth Open Detection using Contours
-          final upperLip = face.contours[FaceContourType.upperLipTop];
-          final lowerLip = face.contours[FaceContourType.lowerLipBottom];
-          if (upperLip != null && lowerLip != null) {
-            double upperY = upperLip.points
-                    .map((p) => p.y.toDouble())
-                    .reduce((a, b) => a + b) /
-                upperLip.points.length;
-            double lowerY = lowerLip.points
-                    .map((p) => p.y.toDouble())
-                    .reduce((a, b) => a + b) /
-                lowerLip.points.length;
-            double diff = (lowerY - upperY).abs();
-            if (diff > 40) success = true;
+          final nose = face.landmarks[FaceLandmarkType.noseBase];
+          final mouth = face.landmarks[FaceLandmarkType.bottomMouth];
+          if (nose != null && mouth != null) {
+            double diff =
+                (mouth.position.y.toDouble() - nose.position.y.toDouble())
+                    .abs();
+            double faceHeight = face.boundingBox.height.toDouble();
+            if ((diff / faceHeight) > 0.25) success = true;
           }
           break;
       }
+
+      await File(photo.path).delete();
+      _isProcessing = false;
 
       if (success) {
         _livenessPassed = true;
@@ -337,6 +374,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       }
     } catch (e) {
       debugPrint("Liveness Error: $e");
+      _isProcessing = false;
     }
   }
 
@@ -397,7 +435,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _currentPhase = AttendancePhase.fail;
       _statusMessage = msg;
     });
-    // Redirect to Step 1 after 2 seconds
     Timer(const Duration(seconds: 2), () {
       if (mounted) _startPhase1();
     });
@@ -503,6 +540,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Widget _buildLivenessUI() {
+    Color frameColor = _livenessFaceDetected ? Colors.orange : Colors.purple;
     return Container(
         color: Colors.black,
         child: Stack(children: [
@@ -513,7 +551,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   width: 280,
                   height: 350,
                   decoration: BoxDecoration(
-                      border: Border.all(color: Colors.purple, width: 4),
+                      border: Border.all(color: frameColor, width: 4),
                       borderRadius: BorderRadius.circular(20)))),
           Positioned(
               top: 60,
@@ -543,10 +581,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       decoration: BoxDecoration(
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(30)),
-                      child: Text(_statusMessage,
+                      child: Text(
+                          _livenessFaceDetected
+                              ? _statusMessage
+                              : "Face not detected",
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                              color: Colors.purpleAccent,
+                          style: TextStyle(
+                              color: frameColor,
                               fontSize: 18,
                               fontWeight: FontWeight.bold))))),
         ]));
