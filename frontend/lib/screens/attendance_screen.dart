@@ -248,6 +248,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _livenessSecondsRemaining = 5;
     _livenessPassed = false;
     _livenessFaceDetected = false;
+    // ✅ CRITICAL FIX: Reset processing flags to allow face detection
+    _isProcessing = false;
+    _isSendingFrame = false;
+
+    // ✅ Ensure camera is still initialized (should be from phase1, but safety check)
+    if (_controller == null || !_controller!.value.isInitialized) {
+      debugPrint("⚠️ Liveness: Camera not initialized, reinitializing...");
+      _initializeCamera().then((_) {
+        debugPrint("✅ Liveness: Camera reinitialized");
+      }).catchError((e) {
+        debugPrint("❌ Liveness: Failed to reinitialize camera: $e");
+      });
+    }
 
     final challenges = [
       LivenessChallenge(
@@ -297,17 +310,25 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_livenessPassed || _isProcessing) return;
 
     try {
-      if (_controller == null || !_controller!.value.isInitialized) return;
+      if (_controller == null || !_controller!.value.isInitialized) {
+        debugPrint("⚠️ Liveness: Camera not initialized");
+        return;
+      }
       _isProcessing = true; // Prevent overlapping calls
       final XFile photo = await _controller!.takePicture();
       final List<Face> faces =
           await _faceDetector.processImage(InputImage.fromFilePath(photo.path));
 
+      debugPrint("🔍 Liveness: Detected ${faces.length} face(s)");
+
       // 1. Face Detection Foundation (Same as Step 1)
       if (faces.isEmpty) {
+        debugPrint("⚠️ Liveness: No faces detected");
         if (mounted)
           setState(() {
             _livenessFaceDetected = false;
+            _statusMessage =
+                "Face not detected. Please position your face in the frame.";
           });
         await File(photo.path).delete();
         _isProcessing = false;
@@ -330,6 +351,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       }
 
       // 3. Face is detected and quality is good
+      debugPrint(
+          "✅ Liveness: Face detected with size ${rect.width}x${rect.height}");
       if (mounted)
         setState(() {
           _livenessFaceDetected = true;
@@ -368,13 +391,22 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _isProcessing = false;
 
       if (success) {
+        debugPrint("✅ Liveness: Challenge passed!");
         _livenessPassed = true;
         _livenessTimer?.cancel();
         _handleLivenessSuccess();
+      } else {
+        debugPrint("⏳ Liveness: Challenge not yet met, continuing...");
       }
     } catch (e) {
-      debugPrint("Liveness Error: $e");
+      debugPrint("❌ Liveness Error: $e");
       _isProcessing = false;
+      // Ensure we don't get stuck if there's an error
+      if (mounted) {
+        setState(() {
+          _livenessFaceDetected = false;
+        });
+      }
     }
   }
 
