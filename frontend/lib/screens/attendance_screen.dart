@@ -232,6 +232,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     setState(() {
       _currentPhase = AttendancePhase.transition;
       _statusMessage = "Step 2 of 2\nLiveness Detection";
+      // ✅ Reset processing flags so liveness detection loop can run
+      _isSendingFrame = false;
+      _isProcessing = false;
     });
     Timer(const Duration(seconds: 1), () {
       if (mounted) _startLivenessPhase();
@@ -248,6 +251,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _livenessSecondsRemaining = 5;
     _livenessPassed = false;
     _livenessFaceDetected = false;
+    // Reset processing flags just like in step 1 so detection can run
+    _isProcessing = false;
+    _isSendingFrame = false;
 
     final challenges = [
       LivenessChallenge(
@@ -308,6 +314,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         if (mounted)
           setState(() {
             _livenessFaceDetected = false;
+            _statusMessage = "Place face in frame";
           });
         await File(photo.path).delete();
         _isProcessing = false;
@@ -407,7 +414,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('http://192.168.11.202:8000/api/v1/record'),
+        // Use same backend host as WebSocket to avoid network mismatch errors
+        Uri.parse('http://192.168.137.1:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,
@@ -545,7 +553,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         color: Colors.black,
         child: Stack(children: [
           Center(child: CameraPreview(_controller!)),
-          Container(color: Colors.black.withOpacity(0.3)),
+          // Slight overlay for focus but keep camera bright
+          Container(color: Colors.black.withOpacity(0.12)),
           Center(
               child: Container(
                   width: 280,
