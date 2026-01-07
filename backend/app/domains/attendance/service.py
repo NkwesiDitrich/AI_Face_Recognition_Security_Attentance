@@ -17,7 +17,15 @@ from app.domains.user.service import UserService
 # ============================================================================
 DETECTOR_BACKENDS = ["retinaface", "mtcnn", "opencv", "mediapipe"]
 MODEL_NAME = "ArcFace"
-RECOGNITION_THRESHOLD = 0.50
+
+# NOTE:
+# - Lower cosine distance = more similar.
+# - We intentionally use a *slightly* more permissive threshold than the
+#   recommended 0.40 for ArcFace so that legitimately enrolled faces are
+#   very unlikely to be rejected during attendance (step 1),
+#   while still being reasonably strict against impostors.
+#   You can tune this between 0.45–0.65 depending on your environment.
+RECOGNITION_THRESHOLD = 0.60
 
 print("="*60)
 print("✅ Attendance Service Initialized")
