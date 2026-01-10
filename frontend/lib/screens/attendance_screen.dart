@@ -68,6 +68,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   int _livenessSecondsRemaining = 5;
   bool _livenessPassed = false;
   bool _livenessFaceDetected = false;
+  int _livenessSuccessStreak = 0; // Track consecutive frames with correct expression
 
   @override
   void initState() {
@@ -114,7 +115,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.137.1:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.100.58:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
@@ -251,10 +252,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _livenessSecondsRemaining = 5;
     _livenessPassed = false;
     _livenessFaceDetected = false;
+    _livenessSuccessStreak = 0;
     // Reset processing flags just like in step 1 so detection can run
     _isProcessing = false;
     _isSendingFrame = false;
 
+    // ✅ FIX 1: Randomly select challenge BEFORE setting state to ensure emoji is random
     final challenges = [
       LivenessChallenge(
           type: ChallengeType.smile,
@@ -282,17 +285,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     _livenessTimer?.cancel();
     _livenessTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
 
-      // ✅ Timer only counts down if a face is detected (Paused Timer)
-      if (!_livenessFaceDetected) return;
+      // ✅ FIX 2: Timer only counts down if face is CONTINUOUSLY detected
+      // If face is lost, timer pauses and counter doesn't move
+      if (!_livenessFaceDetected) {
+        // Face not detected - timer pauses, don't count down
+        return;
+      }
 
       setState(() {
         if (_livenessSecondsRemaining > 0) {
           _livenessSecondsRemaining--;
         } else {
           _livenessTimer?.cancel();
-          if (!_livenessPassed) _handleLivenessFailure();
+          // Time ran out without completing expression - fail
+          if (!_livenessPassed) {
+            _handleLivenessFailure();
+          }
         }
       });
     });
@@ -311,11 +324,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
       // 1. Face Detection Foundation (Same as Step 1)
       if (faces.isEmpty) {
-        if (mounted)
+        // ✅ FIX 2 & 3: Face lost - reset everything, timer will pause
+        if (mounted) {
           setState(() {
             _livenessFaceDetected = false;
+            _livenessSuccessStreak = 0; // Reset streak when face is lost
             _statusMessage = "Place face in frame";
           });
+        }
         await File(photo.path).delete();
         _isProcessing = false;
         return;
@@ -326,9 +342,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
       // 2. Quality Gate (Same as Step 1)
       if (rect.width < 120 || rect.height < 120) {
+        // Face too small - don't reset detection, but don't check expression either
         if (mounted)
           setState(() {
-            _livenessFaceDetected = true;
+            _livenessFaceDetected = true; // Keep as detected so timer can run
             _statusMessage = "Come closer";
           });
         await File(photo.path).delete();
@@ -336,37 +353,61 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return;
       }
 
-      // 3. Face is detected and quality is good
-      if (mounted)
+      // 3. Face is detected and quality is good - timer can count down
+      if (mounted) {
         setState(() {
           _livenessFaceDetected = true;
           _statusMessage = _currentChallenge!.instruction;
         });
+      }
 
-      bool success = false;
+      bool expressionMatched = false;
+      String debugInfo = "";
 
-      // 4. Liveness Logic
+      // 4. Liveness Logic - Check if expression matches challenge
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
-          if ((face.smilingProbability ?? 0) > 0.6) success = true;
+          final smileProb = face.smilingProbability ?? 0.0;
+          // Lower threshold for smile - ML Kit sometimes reports lower values
+          expressionMatched = smileProb > 0.4;
+          debugInfo = "Smile: $smileProb (need >0.4)";
+          debugPrint("😊 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.blink:
-          if ((face.leftEyeOpenProbability ?? 1.0) < 0.25 &&
-              (face.rightEyeOpenProbability ?? 1.0) < 0.25) success = true;
+          final leftEye = face.leftEyeOpenProbability ?? 1.0;
+          final rightEye = face.rightEyeOpenProbability ?? 1.0;
+          // For blink: both eyes should be closed (probability < threshold means closed)
+          // Increase threshold to be more forgiving
+          expressionMatched = leftEye < 0.5 && rightEye < 0.5;
+          debugInfo = "Blink: L=$leftEye, R=$rightEye (both need <0.5)";
+          debugPrint("😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.neutral:
-          if ((face.smilingProbability ?? 1.0) < 0.2 &&
-              (face.leftEyeOpenProbability ?? 0) > 0.7) success = true;
+          final smileProb = face.smilingProbability ?? 1.0;
+          final leftEye = face.leftEyeOpenProbability ?? 0.0;
+          final rightEye = face.rightEyeOpenProbability ?? 0.0;
+          // Neutral: low smile AND both eyes reasonably open
+          // More forgiving - just need eyes to be mostly open and no strong smile
+          final avgEyeOpen = (leftEye + rightEye) / 2.0;
+          expressionMatched = smileProb < 0.3 && avgEyeOpen > 0.5;
+          debugInfo = "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.5)";
+          debugPrint("😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.mouthOpen:
           final nose = face.landmarks[FaceLandmarkType.noseBase];
           final mouth = face.landmarks[FaceLandmarkType.bottomMouth];
           if (nose != null && mouth != null) {
-            double diff =
-                (mouth.position.y.toDouble() - nose.position.y.toDouble())
-                    .abs();
-            double faceHeight = face.boundingBox.height.toDouble();
-            if ((diff / faceHeight) > 0.25) success = true;
+            final mouthY = mouth.position.y.toDouble();
+            final noseY = nose.position.y.toDouble();
+            final diff = (mouthY - noseY).abs();
+            final faceHeight = face.boundingBox.height.toDouble();
+            final ratio = diff / faceHeight;
+            // Increase threshold - mouth open should create larger distance
+            expressionMatched = ratio > 0.28;
+            debugInfo = "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.28)";
+            debugPrint("😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          } else {
+            debugPrint("😮 Mouth: Landmarks missing (nose=${nose != null}, mouth=${mouth != null})");
           }
           break;
       }
@@ -374,10 +415,26 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       await File(photo.path).delete();
       _isProcessing = false;
 
-      if (success) {
-        _livenessPassed = true;
-        _livenessTimer?.cancel();
-        _handleLivenessSuccess();
+      // ✅ Require expression to be held for 2 consecutive frames (reduced from 3)
+      // This prevents false positives while still being achievable
+      if (expressionMatched) {
+        _livenessSuccessStreak++;
+        debugPrint("✅ Expression matched! Streak: $_livenessSuccessStreak/2");
+        if (_livenessSuccessStreak >= 2) {
+          // Expression held consistently - success!
+          if (mounted && !_livenessPassed) {
+            debugPrint("🎉 Liveness PASSED! Expression held for 2 frames.");
+            _livenessPassed = true;
+            _livenessTimer?.cancel();
+            _handleLivenessSuccess();
+          }
+        }
+      } else {
+        // Expression not matched - reset streak
+        if (_livenessSuccessStreak > 0) {
+          debugPrint("❌ Expression not matched. Resetting streak from $_livenessSuccessStreak to 0");
+          _livenessSuccessStreak = 0;
+        }
       }
     } catch (e) {
       debugPrint("Liveness Error: $e");
@@ -415,7 +472,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     try {
       final response = await http.post(
         // Use same backend host as WebSocket to avoid network mismatch errors
-        Uri.parse('http://192.168.137.1:8000/api/v1/record'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,
