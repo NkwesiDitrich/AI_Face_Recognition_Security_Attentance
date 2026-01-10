@@ -68,7 +68,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   int _livenessSecondsRemaining = 5;
   bool _livenessPassed = false;
   bool _livenessFaceDetected = false;
-  int _livenessSuccessStreak = 0; // Track consecutive frames with correct expression
+  int _livenessSuccessStreak =
+      0; // Track consecutive frames with correct expression
+  String? _currentSessionId; // Track session ID from recognition
+  DateTime? _livenessStartTime; // Track when liveness started
+  String? _currentChallengeAction; // Track current challenge action type
 
   @override
   void initState() {
@@ -115,7 +119,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.100.58:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.137.1:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
@@ -203,6 +207,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void _processBackendResponse(Map<String, dynamic> res) {
     if (!mounted) return;
     if (res['status'] == 'recognized') {
+      // ✅ Store session_id from backend response
+      _currentSessionId = res['session_id'] as String?;
       setState(() {
         _currentPhase = AttendancePhase.success;
         _isRecognized = true;
@@ -214,6 +220,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         if (mounted) _startTransitionPhase();
       });
     } else if (res['status'] == 'not_recognized') {
+      // Session ID might still be in response even on failure
+      _currentSessionId = res['session_id'] as String?;
       setState(() {
         _currentPhase = AttendancePhase.fail;
         _statusMessage = "Face not registered";
@@ -224,6 +232,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             _currentPhase = AttendancePhase.phase1;
             _isSendingFrame = false;
             _faceFirstDetectedAt = null;
+            _currentSessionId = null; // Reset session on retry
           });
       });
     }
@@ -253,6 +262,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _livenessPassed = false;
     _livenessFaceDetected = false;
     _livenessSuccessStreak = 0;
+    _livenessStartTime = DateTime.now(); // ✅ Track liveness start time
     // Reset processing flags just like in step 1 so detection can run
     _isProcessing = false;
     _isSendingFrame = false;
@@ -277,11 +287,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           emoji: "😐"),
     ];
     _currentChallenge = challenges[Random().nextInt(challenges.length)];
+    // ✅ Store challenge action name for logging
+    _currentChallengeAction = _getChallengeActionName(_currentChallenge!.type);
 
     setState(() {
       _currentPhase = AttendancePhase.liveness;
       _statusMessage = _currentChallenge!.instruction;
     });
+
+    // ✅ Log liveness started (async, don't wait)
+    _logLivenessStarted();
 
     _livenessTimer?.cancel();
     _livenessTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -371,7 +386,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           // Lower threshold for smile - ML Kit sometimes reports lower values
           expressionMatched = smileProb > 0.4;
           debugInfo = "Smile: $smileProb (need >0.4)";
-          debugPrint("😊 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          debugPrint(
+              "😊 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.blink:
           final leftEye = face.leftEyeOpenProbability ?? 1.0;
@@ -380,7 +396,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           // Increase threshold to be more forgiving
           expressionMatched = leftEye < 0.5 && rightEye < 0.5;
           debugInfo = "Blink: L=$leftEye, R=$rightEye (both need <0.5)";
-          debugPrint("😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          debugPrint(
+              "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.neutral:
           final smileProb = face.smilingProbability ?? 1.0;
@@ -390,8 +407,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           // More forgiving - just need eyes to be mostly open and no strong smile
           final avgEyeOpen = (leftEye + rightEye) / 2.0;
           expressionMatched = smileProb < 0.3 && avgEyeOpen > 0.5;
-          debugInfo = "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.5)";
-          debugPrint("😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          debugInfo =
+              "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.5)";
+          debugPrint(
+              "😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.mouthOpen:
           final nose = face.landmarks[FaceLandmarkType.noseBase];
@@ -404,10 +423,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             final ratio = diff / faceHeight;
             // Increase threshold - mouth open should create larger distance
             expressionMatched = ratio > 0.28;
-            debugInfo = "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.28)";
-            debugPrint("😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+            debugInfo =
+                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.28)";
+            debugPrint(
+                "😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           } else {
-            debugPrint("😮 Mouth: Landmarks missing (nose=${nose != null}, mouth=${mouth != null})");
+            debugPrint(
+                "😮 Mouth: Landmarks missing (nose=${nose != null}, mouth=${mouth != null})");
           }
           break;
       }
@@ -432,7 +454,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       } else {
         // Expression not matched - reset streak
         if (_livenessSuccessStreak > 0) {
-          debugPrint("❌ Expression not matched. Resetting streak from $_livenessSuccessStreak to 0");
+          debugPrint(
+              "❌ Expression not matched. Resetting streak from $_livenessSuccessStreak to 0");
           _livenessSuccessStreak = 0;
         }
       }
@@ -451,7 +474,61 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
+  String _getChallengeActionName(ChallengeType type) {
+    switch (type) {
+      case ChallengeType.smile:
+        return "smile";
+      case ChallengeType.blink:
+        return "blink";
+      case ChallengeType.mouthOpen:
+        return "mouth_open";
+      case ChallengeType.neutral:
+        return "neutral";
+    }
+  }
+
+  Future<void> _logLivenessStarted() async {
+    if (_currentSessionId == null || _recognizedUserId == null) return;
+    try {
+      await http.post(
+        Uri.parse('http://192.168.137.1:8000/api/v1/liveness/started'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'session_id': _currentSessionId,
+          'user_id': _recognizedUserId,
+          'device_id': 'mobile_app',
+          'actions_requested': [_currentChallengeAction ?? 'unknown'],
+        }),
+      );
+    } catch (e) {
+      debugPrint("⚠️ Failed to log liveness started: $e");
+    }
+  }
+
+  Future<void> _logLivenessAttempt(int attemptNum, String? failedAction) async {
+    if (_currentSessionId == null) return;
+    try {
+      await http.post(
+        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/attempt'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'session_id': _currentSessionId,
+          'attempt_number': attemptNum,
+          'failed_action': failedAction,
+          'reason': 'timeout',
+        }),
+      );
+    } catch (e) {
+      debugPrint("⚠️ Failed to log liveness attempt: $e");
+    }
+  }
+
   void _handleLivenessFailure() {
+    // ✅ Log liveness attempt failure
+    if (_currentSessionId != null) {
+      _logLivenessAttempt(_attempts, _currentChallengeAction);
+    }
+
     if (_attempts < _maxAttempts) {
       setState(() {
         _statusMessage = "Liveness failed. Try again.";
@@ -460,8 +537,37 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         if (mounted) _startLivenessPhase();
       });
     } else {
-      _showFinalFailure("Liveness check failed. Please try again.");
+      // ✅ Log final liveness failure by calling record with liveness=failed
+      // This will trigger backend logging without creating attendance record
+      _recordAttendanceFailure();
     }
+  }
+
+  Future<void> _recordAttendanceFailure() async {
+    // Record liveness failure - backend will log it but not create attendance record
+    try {
+      await http.post(
+        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'user_id': _recognizedUserId,
+          'liveness': 'failed',
+          'event_type': 'check_in',
+          'session_id': _currentSessionId ??
+              DateTime.now().millisecondsSinceEpoch.toString(),
+          'device_id': 'mobile_app',
+          'attempts_used': _attempts,
+          'final_failed_action': _currentChallengeAction,
+          'actions_requested': [_currentChallengeAction ?? 'unknown'],
+          'liveness_start_time': _livenessStartTime != null
+              ? _livenessStartTime!.millisecondsSinceEpoch / 1000.0
+              : null,
+        }),
+      );
+    } catch (e) {
+      debugPrint("⚠️ Failed to log liveness failure: $e");
+    }
+    _showFinalFailure("Liveness check failed. Please try again.");
   }
 
   Future<void> _recordAttendance() async {
@@ -478,7 +584,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           'user_id': _recognizedUserId,
           'liveness': 'passed',
           'event_type': 'check_in',
-          'session_id': DateTime.now().millisecondsSinceEpoch.toString(),
+          'session_id': _currentSessionId ??
+              DateTime.now().millisecondsSinceEpoch.toString(),
+          'device_id': 'mobile_app',
+          'attempts_used': _attempts,
+          'actions_requested': [_currentChallengeAction ?? 'unknown'],
+          'liveness_start_time': _livenessStartTime != null
+              ? _livenessStartTime!.millisecondsSinceEpoch / 1000.0
+              : null,
         }),
       );
 

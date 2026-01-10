@@ -22,7 +22,7 @@ class User(BaseModel):
     employee_id: str = Field(..., min_length=1, description="Unique employee ID")
     access_level: str = Field(default="employee", description="Access level")
     face_encodings: List[float] = Field(default_factory=list, description="Face encoding vector")
-    image_base64: Optional[str] = Field(None, description="Base64 encoded image data for Admin display")
+    # ✅ REMOVED: image_base64 - images should not be stored in database (unprofessional, storage inefficient)
 
     # ✅ Pydantic v2 config
     model_config = ConfigDict(

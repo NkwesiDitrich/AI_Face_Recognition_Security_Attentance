@@ -16,7 +16,6 @@ import numpy as np
 import cv2
 import os
 import tempfile
-import base64
 
 from deepface import DeepFace
 from fastapi.concurrency import run_in_threadpool
@@ -24,6 +23,10 @@ from fastapi.concurrency import run_in_threadpool
 from app.domains.user.models import User
 from app.domains.user.schemas import UserCreate, UserOut
 from app.domains.user.repository import UserRepository
+from app.domains.system_log.repository import SystemLogRepository
+from app.domains.system_log.models import SystemLog
+from datetime import datetime
+import time
 
 
 # ---------------------------
@@ -47,8 +50,9 @@ RECOGNITION_COSINE_THRESHOLD = 0.40
 
 
 class UserService:
-    def __init__(self, user_repo: UserRepository):
+    def __init__(self, user_repo: UserRepository, system_log_repo: SystemLogRepository = None):
         self.user_repo = user_repo
+        self.system_log_repo = system_log_repo  # Optional - will be None if not injected
 
     # -----------------------------
     # Helpers
@@ -210,20 +214,73 @@ class UserService:
     async def enroll_user(
         self,
         user_data: UserCreate,
-        image_data: bytes
+        image_data: bytes,
+        device_id: str = "mobile_app",
+        initiated_by: str = "mobile_app"
     ) -> Union[UserOut, Dict[str, Any], None]:
+        
+        start_time = time.time()
+        
+        # ✅ LOG 1: Enrollment started
+        if self.system_log_repo:
+            try:
+                await self.system_log_repo.add_log(SystemLog(
+                    type="face_enrollment",
+                    stage="started",
+                    user_id=None,  # Not yet created
+                    initiated_by=initiated_by,
+                    device_id=device_id,
+                    metadata={"name": user_data.name, "employee_id": user_data.employee_id}
+                ))
+            except Exception as e:
+                print(f"⚠️ Failed to log enrollment started: {e}")
 
         print(f"📸 Extracting face encoding for user: {user_data.name}")
         encoding = await self._extract_encoding(image_data, is_enrollment=True)
 
         if not encoding:
             print(f"❌ Face detection/encoding failed for {user_data.name}")
+            # ✅ LOG: Enrollment failed
+            if self.system_log_repo:
+                try:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    await self.system_log_repo.add_log(SystemLog(
+                        type="face_enrollment",
+                        stage="failed",
+                        reason="face_detection_failed",
+                        duration_ms=duration_ms,
+                        device_id=device_id,
+                        initiated_by=initiated_by,
+                        metadata={"name": user_data.name, "employee_id": user_data.employee_id}
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Failed to log enrollment failed: {e}")
             return None
 
         print("🔍 Checking for duplicate enrollment...")
         duplicate_user = await self._check_duplicate_enrollment(encoding)
         if duplicate_user:
             print(f"❌ Enrollment rejected: Duplicate face detected (matches {duplicate_user.name})")
+            # ✅ LOG: Enrollment failed (duplicate)
+            if self.system_log_repo:
+                try:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    await self.system_log_repo.add_log(SystemLog(
+                        type="face_enrollment",
+                        stage="failed",
+                        reason="duplicate_face",
+                        duration_ms=duration_ms,
+                        device_id=device_id,
+                        initiated_by=initiated_by,
+                        metadata={
+                            "name": user_data.name,
+                            "employee_id": user_data.employee_id,
+                            "existing_user_id": str(duplicate_user.id),
+                            "existing_user_name": duplicate_user.name
+                        }
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Failed to log enrollment duplicate: {e}")
             return {
                 "error": "duplicate",
                 "message": f"Face already registered as {duplicate_user.name}",
@@ -232,17 +289,33 @@ class UserService:
                 "existing_employee_id": duplicate_user.employee_id,
             }
 
-        image_base64 = base64.b64encode(image_data).decode("utf-8")
-
+        # ✅ REMOVED: image_base64 - images should not be stored in database
         new_user = User(
             name=user_data.name,
             employee_id=user_data.employee_id,
             access_level=user_data.access_level,
             face_encodings=encoding,
-            image_base64=image_base64,
         )
 
         saved_user = await self.user_repo.add_user(new_user)
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        # ✅ LOG 2: Enrollment completed (SUCCESS)
+        if self.system_log_repo:
+            try:
+                await self.system_log_repo.add_log(SystemLog(
+                    type="face_enrollment",
+                    stage="completed",
+                    user_id=str(saved_user.id),
+                    embedding_size=len(encoding),
+                    model_version=MODEL_NAME,
+                    duration_ms=duration_ms,
+                    device_id=device_id,
+                    initiated_by=initiated_by
+                ))
+            except Exception as e:
+                print(f"⚠️ Failed to log enrollment completed: {e}")
+        
         return UserOut(
             id=str(saved_user.id),
             name=saved_user.name,
