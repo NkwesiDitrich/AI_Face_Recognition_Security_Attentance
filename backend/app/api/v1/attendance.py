@@ -44,6 +44,11 @@ async def websocket_endpoint(
             # Receive data - can be image bytes or JSON with session metadata
             data = await websocket.receive()
             
+            # Check if this is a disconnect message
+            if data.get("type") == "websocket.disconnect":
+                print("🔌 WebSocket client disconnected")
+                break
+            
             if "bytes" in data:
                 # Image data for recognition
                 image_data = data["bytes"]
@@ -71,8 +76,20 @@ async def websocket_endpoint(
                     # Handle metadata if needed
                 except:
                     pass
-    except WebSocketDisconnect: 
-        pass
+    except WebSocketDisconnect:
+        print("🔌 WebSocket disconnected (exception)")
+    except RuntimeError as e:
+        # Handle the case where receive() is called after disconnect
+        if "disconnect" in str(e).lower():
+            print(f"🔌 WebSocket already disconnected: {e}")
+        else:
+            raise
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("🔌 WebSocket connection closed")
 
 @router.post("/liveness/started")
 async def liveness_started(

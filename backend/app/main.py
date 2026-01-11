@@ -1,6 +1,7 @@
 # backend/app/main.py
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 import asyncio # <-- NEW IMPORT for the fix
 from app.core.database import connect_to_mongo, close_mongo_connection
@@ -9,12 +10,28 @@ from app.core.ai_model import load_ai_models
 # Routers (uncommented)
 from app.api.v1.user import router as user_router
 from app.api.v1.attendance import router as attendance_router
+from app.api.v1.admin import router as admin_router
 
 
 
 app = FastAPI(
     title="AI Face Attendance System (DDD)",
     version="1.0.0",
+)
+
+# CORS Configuration - Allow frontend to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # admin-web default port
+        "http://localhost:5173",  # Vite dev server
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        # Add your mobile app URL if needed
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ----------------------------
@@ -37,6 +54,7 @@ async def shutdown_event():
 # ----------------------------
 app.include_router(user_router, tags=["User"], prefix="/api/v1")
 app.include_router(attendance_router, tags=["Attendance"], prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 # ----------------------------
 # Root Check

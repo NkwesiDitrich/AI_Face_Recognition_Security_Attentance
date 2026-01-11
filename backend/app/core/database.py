@@ -16,11 +16,16 @@ async def connect_to_mongo():
     print("Connecting to MongoDB...")
 
     try:
-        client = AsyncIOMotorClient(MONGO_DETAILS)
+        client = AsyncIOMotorClient(MONGO_DETAILS, serverSelectionTimeoutMS=5000)
+        # Test the connection
+        await client.admin.command('ping')
         database = client.get_database(DATABASE_NAME)
         print("Successfully connected to MongoDB!")
     except Exception as e:
-        print(f"Could not connect to MongoDB: {e}")
+        print(f"❌ ERROR: Could not connect to MongoDB: {e}")
+        print(f"   Make sure MongoDB is running on {MONGO_DETAILS}")
+        print(f"   Start MongoDB service or run: mongod")
+        raise  # Re-raise to stop server if MongoDB is not available
 
 
 async def close_mongo_connection():

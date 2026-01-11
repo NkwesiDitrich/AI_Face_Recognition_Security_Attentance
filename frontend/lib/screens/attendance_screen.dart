@@ -119,7 +119,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.137.1:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.100.58:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
@@ -491,7 +491,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_currentSessionId == null || _recognizedUserId == null) return;
     try {
       await http.post(
-        Uri.parse('http://192.168.137.1:8000/api/v1/liveness/started'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/started'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'session_id': _currentSessionId,

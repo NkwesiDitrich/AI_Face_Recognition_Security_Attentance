@@ -7,3 +7,6 @@ opencv-python
 deepface
 python-multipart
 python-dotenv
+python-jose[cryptography]
+bcrypt
+passlib[bcrypt]

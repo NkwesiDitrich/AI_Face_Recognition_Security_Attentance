@@ -47,6 +47,7 @@ class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, description="User's full name")
     employee_id: Optional[str] = Field(None, min_length=1, description="Unique employee ID")
     access_level: Optional[str] = Field(None, description="Access level")
+    status: Optional[str] = Field(None, description="User status: active or inactive")
 
     class Config:
         json_schema_extra = {

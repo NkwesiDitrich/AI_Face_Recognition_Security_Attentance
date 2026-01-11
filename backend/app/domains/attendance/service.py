@@ -324,6 +324,7 @@ class AttendanceService:
                 try:
                     await self.system_log_repo.add_log(SystemLog(
                         type="attendance_record",
+                        stage="created",
                         user_id=user_id,
                         session_id=session_id,
                         event_type=event_type,

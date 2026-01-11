@@ -21,6 +21,7 @@ class User(BaseModel):
     name: str = Field(..., min_length=1, description="User's full name")
     employee_id: str = Field(..., min_length=1, description="Unique employee ID")
     access_level: str = Field(default="employee", description="Access level")
+    status: str = Field(default="active", description="User status: active or inactive")
     face_encodings: List[float] = Field(default_factory=list, description="Face encoding vector")
     # ✅ REMOVED: image_base64 - images should not be stored in database (unprofessional, storage inefficient)
 

@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.domains.attendance.models import AttendanceLog
 
@@ -28,3 +28,58 @@ class AttendanceRepository:
             doc["_id"] = str(doc["_id"])
             logs.append(AttendanceLog(**doc))
         return logs
+    
+    async def get_all_logs(
+        self, 
+        skip: int = 0, 
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> tuple[List[AttendanceLog], int]:
+        """Get all attendance logs with filtering (for admin)"""
+        from datetime import datetime
+        from bson import ObjectId
+        
+        query = {}
+        
+        if user_id:
+            query["user_id"] = user_id
+        
+        if start_date or end_date:
+            query["timestamp"] = {}
+            if start_date:
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query["timestamp"]["$gte"] = start_dt
+            if end_date:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query["timestamp"]["$lte"] = end_dt
+        
+        if status:
+            query["liveness"] = status
+        
+        # Get total count
+        total = await self.collection.count_documents(query)
+        
+        # Get paginated results
+        logs = []
+        cursor = self.collection.find(query).skip(skip).limit(limit).sort("timestamp", -1)
+        async for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            logs.append(AttendanceLog(**doc))
+        
+        return logs, total
+    
+    async def get_log_by_id(self, log_id: str) -> Optional[AttendanceLog]:
+        """Get a single attendance log by ID"""
+        from bson import ObjectId
+        
+        if not ObjectId.is_valid(log_id):
+            return None
+        
+        doc = await self.collection.find_one({"_id": ObjectId(log_id)})
+        if doc:
+            doc["_id"] = str(doc["_id"])
+            return AttendanceLog(**doc)
+        return None

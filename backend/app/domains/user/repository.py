@@ -53,3 +53,43 @@ class UserRepository:
 
         result = await self.collection.delete_one({"_id": ObjectId(user_id)})
         return result.deleted_count > 0
+    
+    async def get_all_users(self, skip: int = 0, limit: int = 100, search: Optional[str] = None, access_level: Optional[str] = None, status: Optional[str] = None) -> tuple[List[User], int]:
+        """Get all users with pagination, search, and filtering (for admin)"""
+        query = {}
+        
+        if search:
+            query["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"employee_id": {"$regex": search, "$options": "i"}}
+            ]
+        
+        if access_level:
+            query["access_level"] = access_level
+        
+        if status:
+            query["status"] = status
+        
+        # Get total count
+        total = await self.collection.count_documents(query)
+        
+        # Get paginated results
+        users = []
+        cursor = self.collection.find(query).skip(skip).limit(limit).sort("name", 1)
+        async for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            # Exclude face_encodings from list view for performance
+            if "face_encodings" in doc:
+                doc["face_encodings"] = []  # Don't send encoding data in list
+            users.append(User(**doc))
+        
+        return users, total
+    
+    async def check_employee_id_exists(self, employee_id: str, exclude_user_id: Optional[str] = None) -> bool:
+        """Check if employee_id already exists"""
+        query = {"employee_id": employee_id}
+        if exclude_user_id and ObjectId.is_valid(exclude_user_id):
+            query["_id"] = {"$ne": ObjectId(exclude_user_id)}
+        
+        count = await self.collection.count_documents(query)
+        return count > 0
