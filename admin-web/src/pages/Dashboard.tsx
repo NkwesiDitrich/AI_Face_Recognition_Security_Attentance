@@ -1,28 +1,65 @@
+import { useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Users, Calendar, XCircle, AlertCircle, Activity, CheckCircle } from 'lucide-react'
+import { Users, Calendar, XCircle, AlertCircle, Activity, CheckCircle, Download } from 'lucide-react'
 import { api } from '@/lib/api'
+import { format } from 'date-fns'
 
 export default function Dashboard() {
-  const { data: stats } = useQuery({
-    queryKey: ['dashboard-stats'],
-    queryFn: async () => {
-      // This will need backend endpoints - for now return mock data structure
-      return {
-        totalUsers: 0,
-        todayAttendance: 0,
-        currentCheckedIn: 0,
-        failedRecognitionToday: 0,
-        failedLivenessToday: 0,
-        systemStatus: 'online' as 'online' | 'degraded' | 'offline',
-        recentActivity: []
-      }
-    }
+  const navigate = useNavigate()
+
+  const { data: stats, isLoading, isError } = useQuery({
+    queryKey: ['dashboard-overview'],
+    queryFn: () => api.getDashboardOverview(),
+    refetchInterval: 8000, // near real-time refresh
+    staleTime: 4000,
   })
+
+  const todayRange = useMemo(() => {
+    const now = new Date()
+    const start = new Date(now)
+    start.setHours(0, 0, 0, 0)
+    const end = new Date(now)
+    end.setHours(23, 59, 59, 999)
+    return { start: start.toISOString(), end: end.toISOString() }
+  }, [])
+
+  const handleExportToday = async () => {
+    const records = await api.getAttendanceRecords({
+      start_date: todayRange.start,
+      end_date: todayRange.end,
+    })
+
+    const headers = ['User', 'Date', 'Time', 'Event Type', 'Liveness', 'Status', 'Device', 'Session ID']
+    const rows = (records || []).map((record: any) => {
+      const date = new Date(record.timestamp)
+      const liveness = record.liveness_status || record.liveness
+      return [
+        record.user_name || 'Unknown',
+        format(date, 'yyyy-MM-dd'),
+        format(date, 'HH:mm:ss'),
+        record.event_type || 'check_in',
+        liveness === 'passed' ? 'Passed' : liveness === 'failed' ? 'Failed' : 'N/A',
+        liveness === 'passed' ? 'Success' : 'Failed',
+        record.device_id || 'N/A',
+        record.session_id || 'N/A',
+      ]
+    })
+
+    const csvContent = [headers.join(','), ...rows.map((row: any[]) => row.map((cell) => `"${cell}"`).join(','))].join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `attendance-today-${format(new Date(), 'yyyy-MM-dd')}.csv`
+    a.click()
+    window.URL.revokeObjectURL(url)
+  }
 
   const statsCards = [
     {
       title: 'Total Registered Users',
-      value: stats?.totalUsers || 0,
+      value: stats?.total_users || 0,
       icon: Users,
       color: 'bg-blue-500',
       textColor: 'text-blue-600',
@@ -30,7 +67,7 @@ export default function Dashboard() {
     },
     {
       title: "Today's Attendance",
-      value: stats?.todayAttendance || 0,
+      value: stats?.today_attendance_count || 0,
       icon: Calendar,
       color: 'bg-green-500',
       textColor: 'text-green-600',
@@ -38,7 +75,7 @@ export default function Dashboard() {
     },
     {
       title: 'Currently Checked In',
-      value: stats?.currentCheckedIn || 0,
+      value: stats?.currently_checked_in_users || 0,
       icon: CheckCircle,
       color: 'bg-purple-500',
       textColor: 'text-purple-600',
@@ -46,7 +83,7 @@ export default function Dashboard() {
     },
     {
       title: 'Failed Recognition (Today)',
-      value: stats?.failedRecognitionToday || 0,
+      value: stats?.failed_recognition_today || 0,
       icon: XCircle,
       color: 'bg-red-500',
       textColor: 'text-red-600',
@@ -54,7 +91,7 @@ export default function Dashboard() {
     },
     {
       title: 'Failed Liveness (Today)',
-      value: stats?.failedLivenessToday || 0,
+      value: stats?.failed_liveness_today || 0,
       icon: AlertCircle,
       color: 'bg-orange-500',
       textColor: 'text-orange-600',
@@ -62,11 +99,11 @@ export default function Dashboard() {
     },
     {
       title: 'System Status',
-      value: stats?.systemStatus || 'online',
+      value: stats?.system_status || 'online',
       icon: Activity,
-      color: stats?.systemStatus === 'online' ? 'bg-green-500' : stats?.systemStatus === 'degraded' ? 'bg-yellow-500' : 'bg-red-500',
-      textColor: stats?.systemStatus === 'online' ? 'text-green-600' : stats?.systemStatus === 'degraded' ? 'text-yellow-600' : 'text-red-600',
-      bgColor: stats?.systemStatus === 'online' ? 'bg-green-50' : stats?.systemStatus === 'degraded' ? 'bg-yellow-50' : 'bg-red-50',
+      color: stats?.system_status === 'online' ? 'bg-green-500' : stats?.system_status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500',
+      textColor: stats?.system_status === 'online' ? 'text-green-600' : stats?.system_status === 'degraded' ? 'text-yellow-600' : 'text-red-600',
+      bgColor: stats?.system_status === 'online' ? 'bg-green-50' : stats?.system_status === 'degraded' ? 'bg-yellow-50' : 'bg-red-50',
     },
   ]
 
@@ -81,7 +118,8 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex space-x-3">
-          <button className="btn btn-secondary">
+          <button onClick={handleExportToday} className="btn btn-secondary">
+            <Download className="w-4 h-4 mr-2" />
             Export Today's Report
           </button>
         </div>
@@ -89,6 +127,16 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {isLoading && (
+          <div className="card md:col-span-2 lg:col-span-3">
+            <div className="text-center py-8 text-gray-500">Loading dashboard data...</div>
+          </div>
+        )}
+        {isError && (
+          <div className="card md:col-span-2 lg:col-span-3">
+            <div className="text-center py-8 text-red-600">Failed to load dashboard data. Check backend logs.</div>
+          </div>
+        )}
         {statsCards.map((card, index) => {
           const Icon = card.icon
           return (
@@ -113,13 +161,16 @@ export default function Dashboard() {
       <div className="card">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-xl font-bold text-gray-900">Recent Activity</h2>
-          <button className="text-sm text-primary-600 hover:text-primary-700 font-medium">
-            View All
+          <button
+            className="text-sm text-primary-600 hover:text-primary-700 font-medium"
+            onClick={() => navigate('/attendance')}
+          >
+            View Attendance
           </button>
         </div>
         <div className="space-y-4">
-          {stats?.recentActivity && stats.recentActivity.length > 0 ? (
-            stats.recentActivity.map((activity: any, index: number) => (
+          {stats?.recent_activity && stats.recent_activity.length > 0 ? (
+            stats.recent_activity.map((activity: any, index: number) => (
               <div key={index} className="flex items-center space-x-4 p-4 bg-gray-50 rounded-lg">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 bg-primary-100 rounded-full flex items-center justify-center">
@@ -127,11 +178,15 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900">{activity.title}</p>
-                  <p className="text-xs text-gray-500">{activity.timestamp}</p>
+                  <p className="text-sm font-medium text-gray-900">
+                    {activity.user_name ? `${activity.user_name} — ` : ''}{activity.title}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {activity.timestamp ? format(new Date(activity.timestamp), 'PPpp') : ''}
+                  </p>
                 </div>
                 <div className="flex-shrink-0">
-                  <span className={`badge badge-${activity.type || 'info'}`}>
+                  <span className={`badge ${activity.status === 'failed' ? 'badge-danger' : activity.status === 'success' ? 'badge-success' : 'badge-info'}`}>
                     {activity.status || 'info'}
                   </span>
                 </div>
@@ -148,20 +203,20 @@ export default function Dashboard() {
 
       {/* Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <button className="card hover:shadow-lg transition-shadow text-left group">
+        <button onClick={() => navigate('/users')} className="card hover:shadow-lg transition-shadow text-left group">
           <Users className="w-8 h-8 text-primary-600 mb-3 group-hover:scale-110 transition-transform" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">Register New User</h3>
           <p className="text-sm text-gray-600">Add a new user to the system</p>
         </button>
-        <button className="card hover:shadow-lg transition-shadow text-left group">
+        <button onClick={() => navigate('/attendance')} className="card hover:shadow-lg transition-shadow text-left group">
           <Calendar className="w-8 h-8 text-green-600 mb-3 group-hover:scale-110 transition-transform" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">View Today's Attendance</h3>
           <p className="text-sm text-gray-600">See all attendance records for today</p>
         </button>
-        <button className="card hover:shadow-lg transition-shadow text-left group">
+        <button className="card hover:shadow-lg transition-shadow text-left group" disabled>
           <AlertCircle className="w-8 h-8 text-orange-600 mb-3 group-hover:scale-110 transition-transform" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">Send Announcement</h3>
-          <p className="text-sm text-gray-600">Broadcast a message to all users</p>
+          <p className="text-sm text-gray-600">Coming next (Level 2 - Notifications & Messaging)</p>
         </button>
       </div>
     </div>

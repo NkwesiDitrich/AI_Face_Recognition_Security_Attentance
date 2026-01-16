@@ -8,6 +8,7 @@ import Dashboard from '@/pages/Dashboard'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import Attendance from '@/pages/Attendance'
+import AttendanceFeed from '@/pages/AttendanceFeed'
 
 function App() {
   const { checkAuth, isLoading } = useAuthStore()
@@ -71,6 +72,16 @@ function App() {
           <ProtectedRoute>
             <Layout>
               <Attendance />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/attendance-feed"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <AttendanceFeed />
             </Layout>
           </ProtectedRoute>
         }

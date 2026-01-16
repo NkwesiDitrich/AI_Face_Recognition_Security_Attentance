@@ -20,7 +20,8 @@ class SystemLogRepository:
         "face_enrollment": "enrollment_logs",
         "attendance_recognition": "recognition_logs",
         "liveness": "liveness_logs",
-        "attendance_record": "attendance_logs",
+        # IMPORTANT: keep attendance records (core entity) separate from system logs to avoid schema collisions
+        "attendance_record": "attendance_record_logs",
         "admin_action": "admin_action_logs",
     }
 
@@ -31,7 +32,8 @@ class SystemLogRepository:
             "enrollment_logs": database.get_collection("enrollment_logs"),
             "recognition_logs": database.get_collection("recognition_logs"),
             "liveness_logs": database.get_collection("liveness_logs"),
-            "attendance_logs": database.get_collection("attendance_logs"),
+            # Dedicated system-log collection for attendance_record logs (do NOT use attendance_logs)
+            "attendance_record_logs": database.get_collection("attendance_record_logs"),
             "admin_action_logs": database.get_collection("admin_action_logs"),
             "system_logs": database.get_collection("system_logs"),
         }
@@ -130,7 +132,7 @@ class SystemLogRepository:
         relevant_collections = [
             "recognition_logs",
             "liveness_logs",
-            "attendance_logs"
+            "attendance_record_logs"
         ]
         
         for collection_name in relevant_collections:

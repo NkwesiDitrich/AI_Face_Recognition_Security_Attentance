@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List
+from datetime import datetime, timezone, timedelta
+import asyncio
+import json
 from app.domains.admin.models import AdminOut
 from app.domains.admin.service import AdminService
 from app.domains.user.models import User
@@ -10,12 +13,13 @@ from app.domains.attendance.repository import AttendanceRepository
 from app.domains.system_log.repository import SystemLogRepository
 from app.domains.system_log.models import SystemLog
 from app.dependencies import (
-    get_admin_service,
-    get_current_admin,
+    get_admin_service, 
+    get_current_admin, 
     require_admin_role,
     get_user_repository,
     get_attendance_repository,
     get_system_log_repository,
+    get_admin_repository,
     security
 )
 
@@ -38,6 +42,29 @@ class ResetPasswordRequest(BaseModel):
     email: EmailStr
     new_password: str = Field(..., min_length=6)
 
+
+class DashboardActivityItem(BaseModel):
+    id: str
+    timestamp: str
+    type: str
+    stage: Optional[str] = None
+    status: str
+    title: str
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    device_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class DashboardOverviewResponse(BaseModel):
+    total_users: int
+    today_attendance_count: int
+    currently_checked_in_users: int
+    failed_recognition_today: int
+    failed_liveness_today: int
+    system_status: str  # online | degraded | offline
+    recent_activity: List[DashboardActivityItem]
+
 # Authentication Endpoints
 @router.post("/auth/login", response_model=LoginResponse)
 async def login(
@@ -57,6 +84,186 @@ async def logout(current_admin: AdminOut = Depends(get_current_admin)):
 async def get_me(current_admin: AdminOut = Depends(get_current_admin)):
     """Get current admin info"""
     return current_admin
+
+
+@router.get("/dashboard/overview", response_model=DashboardOverviewResponse)
+async def dashboard_overview(
+    current_admin: AdminOut = Depends(get_current_admin),
+    user_repo: UserRepository = Depends(get_user_repository),
+    attendance_repo: AttendanceRepository = Depends(get_attendance_repository),
+    system_log_repo: SystemLogRepository = Depends(get_system_log_repository),
+):
+    """
+    Level 2 (4) Dashboard overview: real-time operational KPIs + recent activity feed.
+    """
+    # "Today" is computed in UTC for consistency (frontend displays in local time)
+    now_utc = datetime.now(timezone.utc)
+    start_of_day = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = start_of_day + timedelta(days=1)
+
+    # System status: online if DB is reachable
+    system_status = "online"
+    try:
+        # Motor collections expose database -> client
+        await user_repo.collection.database.client.admin.command("ping")
+    except Exception:
+        system_status = "offline"
+
+    # Total users
+    total_users = await user_repo.collection.count_documents({})
+
+    # Today's attendance count (attendance_logs collection - core entity)
+    today_attendance_count = await attendance_repo.collection.count_documents(
+        {"timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    )
+
+    # Currently checked-in users = users whose latest event is check_in (across all time)
+    # Using aggregation: sort desc, group by user_id, take first event_type, then match check_in.
+    pipeline = [
+        {"$sort": {"timestamp": -1}},
+        {"$group": {"_id": "$user_id", "latest_event_type": {"$first": "$event_type"}}},
+        {"$match": {"latest_event_type": "check_in"}},
+        {"$count": "count"},
+    ]
+    agg = await attendance_repo.collection.aggregate(pipeline).to_list(length=1)
+    currently_checked_in_users = agg[0]["count"] if agg else 0
+
+    # Failed recognition today (system logs)
+    recognition_logs = system_log_repo.collections["recognition_logs"]
+    failed_recognition_today = await recognition_logs.count_documents(
+        {"type": "attendance_recognition", "stage": "failed", "timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    )
+
+    # Failed liveness today (system logs)
+    liveness_logs = system_log_repo.collections["liveness_logs"]
+    failed_liveness_today = await liveness_logs.count_documents(
+        {"type": "liveness", "stage": "failed", "timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    )
+
+    # Recent activity (merge last events from multiple collections)
+    # We pull a few from each, then merge by timestamp.
+    attendance_cursor = attendance_repo.collection.find(
+        {"timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    ).sort("timestamp", -1).limit(10)
+    recognition_cursor = recognition_logs.find(
+        {"timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    ).sort("timestamp", -1).limit(10)
+    liveness_cursor = liveness_logs.find(
+        {"timestamp": {"$gte": start_of_day, "$lt": end_of_day}}
+    ).sort("timestamp", -1).limit(10)
+
+    attendance_docs = await attendance_cursor.to_list(length=10)
+    recognition_docs = await recognition_cursor.to_list(length=10)
+    liveness_docs = await liveness_cursor.to_list(length=10)
+
+    # Collect user ids to resolve names in one pass
+    user_ids = set()
+    for d in attendance_docs:
+        if d.get("user_id"):
+            user_ids.add(d["user_id"])
+    for d in recognition_docs:
+        if d.get("user_id"):
+            user_ids.add(d["user_id"])
+    for d in liveness_docs:
+        if d.get("user_id"):
+            user_ids.add(d["user_id"])
+
+    user_name_by_id = {}
+    for uid in user_ids:
+        try:
+            user = await user_repo.get_user_by_id(str(uid))
+            if user:
+                user_name_by_id[str(uid)] = user.name
+        except Exception:
+            continue
+
+    def iso(ts: datetime) -> str:
+        # Ensure ISO string; if naive, assume UTC
+        if ts is None:
+            return ""
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.isoformat()
+
+    activity: List[DashboardActivityItem] = []
+
+    # Attendance events
+    for d in attendance_docs:
+        ts = d.get("timestamp")
+        uid = str(d.get("user_id")) if d.get("user_id") else None
+        event_type = d.get("event_type") or "check_in"
+        liveness = d.get("liveness")
+        status = "success" if liveness == "passed" else "failed"
+        activity.append(
+            DashboardActivityItem(
+                id=str(d.get("_id")),
+                timestamp=iso(ts),
+                type="attendance",
+                stage=event_type,
+                status=status,
+                title=f"Attendance {event_type.replace('_', ' ')}",
+                user_id=uid,
+                user_name=user_name_by_id.get(uid) if uid else None,
+                device_id=d.get("device_id"),
+                session_id=d.get("session_id"),
+            )
+        )
+
+    # Recognition events
+    for d in recognition_docs:
+        ts = d.get("timestamp")
+        uid = str(d.get("user_id")) if d.get("user_id") else None
+        stage = d.get("stage") or "unknown"
+        status = "failed" if stage == "failed" else "success" if stage == "success" else "info"
+        activity.append(
+            DashboardActivityItem(
+                id=str(d.get("_id")),
+                timestamp=iso(ts),
+                type="recognition",
+                stage=stage,
+                status=status,
+                title="Face recognition",
+                user_id=uid,
+                user_name=user_name_by_id.get(uid) if uid else None,
+                device_id=d.get("device_id"),
+                session_id=d.get("session_id"),
+            )
+        )
+
+    # Liveness events
+    for d in liveness_docs:
+        ts = d.get("timestamp")
+        uid = str(d.get("user_id")) if d.get("user_id") else None
+        stage = d.get("stage") or "unknown"
+        status = "failed" if stage == "failed" else "success" if stage == "passed" else "info"
+        activity.append(
+            DashboardActivityItem(
+                id=str(d.get("_id")),
+                timestamp=iso(ts),
+                type="liveness",
+                stage=stage,
+                status=status,
+                title="Liveness check",
+                user_id=uid,
+                user_name=user_name_by_id.get(uid) if uid else None,
+                device_id=d.get("device_id"),
+                session_id=d.get("session_id"),
+            )
+        )
+
+    # Sort merged feed and keep last 10
+    activity.sort(key=lambda x: x.timestamp, reverse=True)
+    activity = activity[:10]
+
+    return DashboardOverviewResponse(
+        total_users=total_users,
+        today_attendance_count=today_attendance_count,
+        currently_checked_in_users=currently_checked_in_users,
+        failed_recognition_today=failed_recognition_today,
+        failed_liveness_today=failed_liveness_today,
+        system_status=system_status,
+        recent_activity=activity,
+    )
 
 # User Management Endpoints
 @router.get("/users")
@@ -197,16 +404,16 @@ async def update_user(
     
     if update_data:
         await user_repo.update_user(user_id, update_data)
-        
-        # Log admin action
-        await system_log_repo.add_log(SystemLog(
-            type="admin_action",
-            stage="updated",
-            admin_id=current_admin.id,
-            action="update_user",
-            target_user_id=user_id,
-            metadata=update_data
-        ))
+    
+    # Log admin action
+    await system_log_repo.add_log(SystemLog(
+        type="admin_action",
+        stage="updated",
+        admin_id=current_admin.id,
+        action="update_user",
+        target_user_id=user_id,
+        metadata=update_data
+    ))
     
     # Get updated user
     updated_user = await user_repo.get_user_by_id(user_id)
@@ -519,3 +726,160 @@ async def get_admin_action_logs(
         logs = await system_log_repo.get_admin_action_logs(limit=limit)
     
     return [log.model_dump(by_alias=True) for log in logs]
+
+# Real-Time Attendance Feed WebSocket
+@router.websocket("/ws/attendance-feed")
+async def attendance_feed_websocket(websocket: WebSocket):
+    """
+    Real-time attendance feed WebSocket endpoint.
+    Streams new attendance events as they occur.
+    """
+    from app.core.database import get_database
+    from app.domains.admin.repository import AdminRepository
+    
+    # Get dependencies manually (WebSocket doesn't support Depends())
+    db = get_database()
+    if db is None:
+        await websocket.close(code=1011, reason="Database not available")
+        return
+    
+    attendance_repo = AttendanceRepository(db)
+    user_repo = UserRepository(db)
+    admin_repo = AdminRepository(db)
+    admin_service = AdminService(admin_repo)
+    
+    # Authenticate via query parameter (WebSocket doesn't support headers easily)
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+    
+    # Verify token
+    try:
+        admin = await admin_service.get_current_admin(token)
+        if not admin:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+    except Exception as e:
+        print(f"⚠️ WebSocket auth error: {e}")
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    await websocket.accept()
+    
+    # Track last seen timestamp to only send new events
+    last_timestamp = datetime.now(timezone.utc) - timedelta(seconds=5)  # Start 5 seconds ago
+    is_paused = False
+    
+    try:
+        # Send initial connection confirmation
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Real-time feed connected",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        
+        while True:
+            # Check for pause/resume commands from client
+            try:
+                # Set timeout to check for client messages
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                try:
+                    command = json.loads(data)
+                    if command.get("action") == "pause":
+                        is_paused = True
+                        await websocket.send_json({
+                            "type": "paused",
+                            "message": "Feed paused"
+                        })
+                        continue
+                    elif command.get("action") == "resume":
+                        is_paused = False
+                        await websocket.send_json({
+                            "type": "resumed",
+                            "message": "Feed resumed"
+                        })
+                        # Update last_timestamp to avoid sending old events
+                        last_timestamp = datetime.now(timezone.utc) - timedelta(seconds=2)
+                        continue
+                except json.JSONDecodeError:
+                    pass
+            except asyncio.TimeoutError:
+                pass  # No message from client, continue polling
+            
+            # If paused, skip polling
+            if is_paused:
+                await asyncio.sleep(1)
+                continue
+            
+            # Poll for new attendance events
+            try:
+                # Query for events after last_timestamp
+                query = {
+                    "timestamp": {"$gt": last_timestamp},
+                    "liveness": {"$exists": True, "$ne": "pending"}
+                }
+                
+                cursor = attendance_repo.collection.find(query).sort("timestamp", 1).limit(50)
+                events = []
+                
+                async for doc in cursor:
+                    doc["_id"] = str(doc["_id"])
+                    if "liveness" not in doc or not doc["liveness"]:
+                        continue
+                    
+                    # Get user name
+                    user_name = "Unknown"
+                    if doc.get("user_id"):
+                        user = await user_repo.get_user_by_id(doc["user_id"])
+                        if user:
+                            user_name = user.name
+                    
+                    # Format event
+                    event = {
+                        "id": doc["_id"],
+                        "user_id": doc.get("user_id"),
+                        "user_name": user_name,
+                        "timestamp": doc["timestamp"].isoformat() if isinstance(doc["timestamp"], datetime) else doc["timestamp"],
+                        "status": "success" if doc.get("liveness") == "passed" else "failed",
+                        "liveness": doc.get("liveness"),
+                        "event_type": doc.get("event_type", "check_in"),
+                        "device_id": doc.get("device_id"),
+                        "session_id": doc.get("session_id")
+                    }
+                    events.append(event)
+                    
+                    # Update last_timestamp
+                    if isinstance(doc["timestamp"], datetime):
+                        if doc["timestamp"] > last_timestamp:
+                            last_timestamp = doc["timestamp"]
+                
+                # Send events to client
+                if events:
+                    for event in events:
+                        await websocket.send_json({
+                            "type": "attendance_event",
+                            "event": event
+                        })
+            
+            except Exception as e:
+                print(f"⚠️ Error polling attendance events: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Error fetching events: {str(e)}"
+                })
+            
+            # Wait before next poll (1 second interval)
+            await asyncio.sleep(1)
+            
+    except WebSocketDisconnect:
+        print("🔌 Attendance feed WebSocket disconnected")
+    except Exception as e:
+        print(f"❌ Attendance feed WebSocket error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass

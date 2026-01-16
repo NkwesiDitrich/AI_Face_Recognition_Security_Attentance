@@ -10,6 +10,7 @@ import {
   X,
   Settings,
   FileText,
+  Activity,
 } from 'lucide-react'
 
 interface LayoutProps {
@@ -20,6 +21,7 @@ const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Users', href: '/users', icon: Users },
   { name: 'Attendance', href: '/attendance', icon: Calendar },
+  { name: 'Live Feed', href: '/attendance-feed', icon: Activity },
   { name: 'Logs', href: '/logs', icon: FileText },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

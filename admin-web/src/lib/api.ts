@@ -164,6 +164,12 @@ class ApiClient {
     const response = await this.client.get('/api/v1/admin/logs/admin-actions', { params })
     return response.data
   }
+
+  // Dashboard (Level 2 - Overview)
+  async getDashboardOverview() {
+    const response = await this.client.get('/api/v1/admin/dashboard/overview')
+    return response.data
+  }
 }
 
 export const api = new ApiClient()
