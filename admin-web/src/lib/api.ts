@@ -78,7 +78,7 @@ class ApiClient {
     const queryParams: any = {}
     if (params?.search) queryParams.search = params.search
     if (params?.status) queryParams.status = params.status
-    if (params?.role) queryParams.access_level = params.role
+    if (params?.role) queryParams.role = params.role  // Fixed: send 'role' instead of 'access_level'
     const response = await this.client.get('/api/v1/admin/users', { params: queryParams })
     // Backend returns {users: [], total: ...}, extract the users array
     return response.data.users || []

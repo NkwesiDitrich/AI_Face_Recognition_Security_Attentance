@@ -22,11 +22,19 @@ class AttendanceRepository:
 
     async def get_logs_by_user(self, user_id: str) -> List[AttendanceLog]:
         """Get all attendance logs for a user."""
-        cursor = self.collection.find({"user_id": user_id})
+        cursor = self.collection.find({"user_id": user_id, "liveness": {"$exists": True, "$ne": "pending"}})
         logs = []
         async for doc in cursor:
             doc["_id"] = str(doc["_id"])
-            logs.append(AttendanceLog(**doc))
+            # Skip records without liveness field
+            if "liveness" not in doc or not doc["liveness"]:
+                continue
+            try:
+                logs.append(AttendanceLog(**doc))
+            except Exception as e:
+                # Skip records that fail validation (old format)
+                print(f"⚠️ Skipping invalid attendance record {doc.get('_id')}: {e}")
+                continue
         return logs
     
     async def get_all_logs(
@@ -56,8 +64,12 @@ class AttendanceRepository:
                 end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
                 query["timestamp"]["$lte"] = end_dt
         
+        # Filter by liveness status (exclude "pending" and missing liveness old records)
         if status:
             query["liveness"] = status
+        else:
+            # Exclude records with "pending" liveness or missing liveness field (old records)
+            query["liveness"] = {"$exists": True, "$ne": "pending"}
         
         # Get total count
         total = await self.collection.count_documents(query)
@@ -67,7 +79,15 @@ class AttendanceRepository:
         cursor = self.collection.find(query).skip(skip).limit(limit).sort("timestamp", -1)
         async for doc in cursor:
             doc["_id"] = str(doc["_id"])
-            logs.append(AttendanceLog(**doc))
+            # Skip records without liveness field (old records)
+            if "liveness" not in doc or not doc["liveness"]:
+                continue
+            try:
+                logs.append(AttendanceLog(**doc))
+            except Exception as e:
+                # Skip records that fail validation (old format)
+                print(f"⚠️ Skipping invalid attendance record {doc.get('_id')}: {e}")
+                continue
         
         return logs, total
     
@@ -81,5 +101,13 @@ class AttendanceRepository:
         doc = await self.collection.find_one({"_id": ObjectId(log_id)})
         if doc:
             doc["_id"] = str(doc["_id"])
-            return AttendanceLog(**doc)
+            # Skip records without liveness field
+            if "liveness" not in doc or not doc["liveness"]:
+                return None
+            try:
+                return AttendanceLog(**doc)
+            except Exception as e:
+                # Skip records that fail validation (old format)
+                print(f"⚠️ Invalid attendance record {log_id}: {e}")
+                return None
         return None

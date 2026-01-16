@@ -417,9 +417,12 @@ async def get_attendance_records(
             if user:
                 record_dict["user_name"] = user.name
         
-        # Add liveness_status and device_id
+        # Add liveness_status (map from liveness field)
         record_dict["liveness_status"] = log.liveness
-        record_dict["device_id"] = log.device_id
+        
+        # Add device_id and session_id (now part of model)
+        record_dict["device_id"] = log.device_id if hasattr(log, "device_id") and log.device_id else None
+        record_dict["session_id"] = log.session_id if hasattr(log, "session_id") and log.session_id else None
         
         records.append(record_dict)
     
@@ -447,9 +450,12 @@ async def get_attendance_record_by_id(
         if user:
             record_dict["user_name"] = user.name
     
-    # Add liveness_status and device_id
+    # Add liveness_status (map from liveness field)
     record_dict["liveness_status"] = log.liveness
-    record_dict["device_id"] = log.device_id
+    
+    # Add device_id and session_id if they exist (may not be in model)
+    record_dict["device_id"] = getattr(log, "device_id", None)
+    record_dict["session_id"] = getattr(log, "session_id", None)
     
     return record_dict
 

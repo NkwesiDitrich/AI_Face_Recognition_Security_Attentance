@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 class AttendanceLog(BaseModel):
     """Represents a single attendance event (check-in or check-out)."""
@@ -11,16 +11,20 @@ class AttendanceLog(BaseModel):
     # Reference to the user who checked in
     user_id: str = Field(...)
 
-    # Timestamp of the event
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    # Timestamp of the event (timezone-aware UTC)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Type of event (e.g., 'check_in', 'check_out')
     # Default: 'check_in' for attendance system
     event_type: str = Field(default="check_in")
 
     # Status of the liveness check
-    # Values: "pending", "passed", "failed"
-    liveness: str = Field(default="pending")
+    # Values: "passed", "failed" (no "pending" - records only created after liveness check)
+    liveness: str = Field(...)  # Required - must be explicitly set to "passed" or "failed"
+
+    # Device and session information
+    device_id: Optional[str] = Field(default=None, description="Device identifier")
+    session_id: Optional[str] = Field(default=None, description="Session identifier")
 
     # Legacy field name (for backward compatibility)
     @property

@@ -319,8 +319,18 @@ class AttendanceService:
                 if recognition_duration is not None and liveness_duration is not None:
                     total_duration_ms = recognition_duration + liveness_duration
             
+            # Only create attendance record if liveness passed
+            if liveness_status != "passed":
+                print(f"\n⚠️ Liveness failed - not creating attendance record")
+                return {
+                    "status": "liveness_failed",
+                    "message": "Liveness check failed. Attendance not recorded.",
+                    "user_id": user_id,
+                    "liveness": liveness_status
+                }
+            
             # ✅ LOG 5: Final attendance record (only if liveness passed)
-            if liveness_status == "passed" and self.system_log_repo:
+            if self.system_log_repo:
                 try:
                     await self.system_log_repo.add_log(SystemLog(
                         type="attendance_record",
@@ -339,12 +349,14 @@ class AttendanceService:
                 except Exception as e:
                     print(f"⚠️ Failed to log attendance record: {e}")
             
-            # Save to attendance logs collection
+            # Save to attendance logs collection (only for passed liveness)
+            # Explicitly set liveness to "passed" since we only create records when liveness passes
             log = AttendanceLog(
                 user_id=user_id, 
-                status="present",
-                liveness=liveness_status,
-                event_type=event_type
+                liveness="passed",  # Always "passed" since we only create records when liveness passes
+                event_type=event_type,
+                device_id=device_id,
+                session_id=session_id
             )
             result = await self.attendance_repo.add_log(log)
             
