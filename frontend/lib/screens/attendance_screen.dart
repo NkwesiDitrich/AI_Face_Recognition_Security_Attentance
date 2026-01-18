@@ -393,9 +393,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           final leftEye = face.leftEyeOpenProbability ?? 1.0;
           final rightEye = face.rightEyeOpenProbability ?? 1.0;
           // For blink: both eyes should be closed (probability < threshold means closed)
-          // Increase threshold to be more forgiving
-          expressionMatched = leftEye < 0.5 && rightEye < 0.5;
-          debugInfo = "Blink: L=$leftEye, R=$rightEye (both need <0.5)";
+          // More forgiving threshold - either eye closed counts as blink attempt
+          // User needs to blink both eyes together
+          expressionMatched = leftEye < 0.7 || rightEye < 0.7;
+          debugInfo = "Blink: L=$leftEye, R=$rightEye (either <0.7)";
           debugPrint(
               "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -421,10 +422,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             final diff = (mouthY - noseY).abs();
             final faceHeight = face.boundingBox.height.toDouble();
             final ratio = diff / faceHeight;
-            // Increase threshold - mouth open should create larger distance
-            expressionMatched = ratio > 0.28;
+            // More forgiving threshold - reduce from 0.28 to 0.22 for easier detection
+            expressionMatched = ratio > 0.22;
             debugInfo =
-                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.28)";
+                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.22)";
             debugPrint(
                 "😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           } else {
@@ -571,6 +572,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _recordAttendance() async {
+    // CRITICAL: Only record if liveness actually passed
+    if (!_livenessPassed) {
+      debugPrint("❌ Cannot record attendance - liveness not passed");
+      _showFinalFailure("Liveness check failed. Please try again.");
+      return;
+    }
+
     setState(() {
       _statusMessage = "Recording attendance...";
     });
@@ -595,26 +603,68 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         }),
       );
 
+      // CRITICAL: Only show "Access Granted" if response is 200 AND status is success
       if (response.statusCode == 200) {
-        setState(() {
-          _currentPhase = AttendancePhase.finalResult;
-          _statusMessage = "Access Granted";
-        });
+        try {
+          final responseData = jsonDecode(response.body);
+          // CRITICAL: Only show access granted if backend explicitly confirms success
+          if (responseData['status'] == 'success' && 
+              (responseData['liveness'] == 'passed' || responseData['liveness'] == null)) {
+            debugPrint("✅ Backend confirmed attendance recorded successfully");
+            setState(() {
+              _currentPhase = AttendancePhase.finalResult;
+              _statusMessage = "Access Granted";
+            });
+          } else {
+            // Backend rejected - liveness failed or status not success
+            debugPrint("❌ Backend rejected attendance - status: ${responseData['status']}, liveness: ${responseData['liveness']}");
+            _showFinalFailure("Liveness check failed. Attendance not recorded.");
+          }
+        } catch (e) {
+          // If response parsing fails, DO NOT assume success - treat as failure
+          debugPrint("❌ Could not parse response - treating as failure: $e");
+          _showFinalFailure("Failed to record attendance. Please try again.");
+        }
+      } else if (response.statusCode == 400) {
+        // HTTP 400 = Bad Request = Liveness failed (backend explicitly rejected)
+        debugPrint("❌ HTTP 400: Backend rejected - liveness failed");
+        try {
+          final errorData = jsonDecode(response.body);
+          debugPrint("   Error detail: ${errorData['detail']}");
+        } catch (e) {
+          debugPrint("   Could not parse error response");
+        }
+        _showFinalFailure("Liveness check failed. Attendance NOT recorded.");
       } else {
+        // Other HTTP error - don't show access granted, redirect to phase 1
+        debugPrint("❌ HTTP error: ${response.statusCode}");
         _showFinalFailure("Failed to record attendance");
       }
     } catch (e) {
+      // Network error - don't show access granted, redirect to phase 1
+      debugPrint("❌ Network error: $e");
       _showFinalFailure("Network Error: $e");
     }
   }
 
   void _showFinalFailure(String msg) {
+    // CRITICAL: Reset liveness state to prevent showing "Access Granted"
+    _livenessPassed = false;
+    _livenessFaceDetected = false;
+    _livenessSuccessStreak = 0;
+    _livenessTimer?.cancel();
+    
     setState(() {
       _currentPhase = AttendancePhase.fail;
       _statusMessage = msg;
     });
+    
+    // Always redirect back to phase 1 (animation screen) after failure
     Timer(const Duration(seconds: 2), () {
-      if (mounted) _startPhase1();
+      if (mounted) {
+        debugPrint("🔄 Redirecting to phase 1 (animation screen) after failure");
+        _startPhase1();
+      }
     });
   }
 

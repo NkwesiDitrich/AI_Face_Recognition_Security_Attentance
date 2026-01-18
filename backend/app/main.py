@@ -11,6 +11,7 @@ from app.core.ai_model import load_ai_models
 from app.api.v1.user import router as user_router
 from app.api.v1.attendance import router as attendance_router
 from app.api.v1.admin import router as admin_router
+from app.api.v1.user_portal import router as user_portal_router
 
 
 
@@ -24,8 +25,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # admin-web default port
+        "http://localhost:3001",  # user-web port
         "http://localhost:5173",  # Vite dev server
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
         "http://127.0.0.1:5173",
         # Add your mobile app URL if needed
     ],
@@ -55,6 +58,7 @@ async def shutdown_event():
 app.include_router(user_router, tags=["User"], prefix="/api/v1")
 app.include_router(attendance_router, tags=["Attendance"], prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(user_portal_router, prefix="/api/v1")
 
 # ----------------------------
 # Root Check

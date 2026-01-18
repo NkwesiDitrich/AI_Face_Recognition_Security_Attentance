@@ -11,7 +11,8 @@ from app.domains.admin.models import Admin, AdminCreate, AdminOut
 from app.domains.admin.repository import AdminRepository
 
 # JWT Configuration
-SECRET_KEY = "your-secret-key-change-this-in-production"  # TODO: Move to environment variable
+# For production, use environment variable: SECRET_KEY = os.getenv("JWT_SECRET_KEY", "...")
+SECRET_KEY = "QL1MGjc63ApIDktA3DxzVE-vNk_jT3zFKgJQmcAWyeo"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days
 

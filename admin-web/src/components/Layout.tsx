@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
+import NotificationBell from './NotificationBell'
 import {
   LayoutDashboard,
   Users,
@@ -11,6 +12,7 @@ import {
   Settings,
   FileText,
   Activity,
+  MessageSquare,
 } from 'lucide-react'
 
 interface LayoutProps {
@@ -22,6 +24,7 @@ const navigation = [
   { name: 'Users', href: '/users', icon: Users },
   { name: 'Attendance', href: '/attendance', icon: Calendar },
   { name: 'Live Feed', href: '/attendance-feed', icon: Activity },
+  { name: 'Messages', href: '/messages', icon: MessageSquare },
   { name: 'Logs', href: '/logs', icon: FileText },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
@@ -143,6 +146,7 @@ export default function Layout({ children }: LayoutProps) {
             </button>
             <div className="flex-1" />
             <div className="flex items-center space-x-4">
+              <NotificationBell />
               <div className="text-sm text-gray-600">
                 {new Date().toLocaleDateString('en-US', {
                   weekday: 'long',

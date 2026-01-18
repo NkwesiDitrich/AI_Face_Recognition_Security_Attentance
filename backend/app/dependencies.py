@@ -9,6 +9,8 @@ from app.domains.attendance.service import AttendanceService
 from app.domains.system_log.repository import SystemLogRepository
 from app.domains.admin.repository import AdminRepository
 from app.domains.admin.service import AdminService
+from app.domains.notification.repository import NotificationRepository, MessageRepository
+from app.domains.notification.service import NotificationService, MessageService
 
 # Dependency Injection Functions
 
@@ -89,3 +91,30 @@ async def require_admin_role(
             detail="Admin access required"
         )
     return current_admin
+
+
+def get_notification_repository(db: AsyncIOMotorDatabase = Depends(get_database)) -> NotificationRepository:
+    """Returns a Notification Repository instance."""
+    return NotificationRepository(db)
+
+
+def get_message_repository(db: AsyncIOMotorDatabase = Depends(get_database)) -> MessageRepository:
+    """Returns a Message Repository instance."""
+    return MessageRepository(db)
+
+
+def get_notification_service(
+    notification_repo: NotificationRepository = Depends(get_notification_repository),
+    user_repo: UserRepository = Depends(get_user_repository)
+) -> NotificationService:
+    """Returns a Notification Service instance."""
+    return NotificationService(notification_repo, user_repo)
+
+
+def get_message_service(
+    message_repo: MessageRepository = Depends(get_message_repository),
+    user_repo: UserRepository = Depends(get_user_repository),
+    notification_repo: NotificationRepository = Depends(get_notification_repository)
+) -> MessageService:
+    """Returns a Message Service instance."""
+    return MessageService(message_repo, user_repo, notification_repo)

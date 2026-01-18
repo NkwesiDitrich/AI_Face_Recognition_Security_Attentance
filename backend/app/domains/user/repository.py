@@ -29,6 +29,7 @@ class UserRepository:
         return users
 
     async def get_user_by_id(self, user_id: str) -> Optional[User]:
+        """Get user by MongoDB _id (ObjectId)"""
         if not ObjectId.is_valid(user_id):
             return None
 
@@ -36,6 +37,24 @@ class UserRepository:
         if doc:
             return User(**doc)
         return None
+    
+    async def get_user_by_employee_id(self, employee_id: str) -> Optional[User]:
+        """Get user by employee_id"""
+        doc = await self.collection.find_one({"employee_id": employee_id})
+        if doc:
+            return User(**doc)
+        return None
+    
+    async def get_user_by_id_or_employee_id(self, identifier: str) -> Optional[User]:
+        """Get user by either MongoDB _id (ObjectId) or employee_id"""
+        # Try as ObjectId first
+        if ObjectId.is_valid(identifier):
+            user = await self.get_user_by_id(identifier)
+            if user:
+                return user
+        
+        # Try as employee_id
+        return await self.get_user_by_employee_id(identifier)
 
     async def update_user(self, user_id: str, data: dict) -> bool:
         if not ObjectId.is_valid(user_id):

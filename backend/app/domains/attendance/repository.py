@@ -1,4 +1,5 @@
 from typing import List, Optional
+from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.domains.attendance.models import AttendanceLog
 
@@ -20,9 +21,44 @@ class AttendanceRepository:
             print(f"❌ Error saving attendance log: {e}")
             raise
 
-    async def get_logs_by_user(self, user_id: str) -> List[AttendanceLog]:
-        """Get all attendance logs for a user."""
-        cursor = self.collection.find({"user_id": user_id, "liveness": {"$exists": True, "$ne": "pending"}})
+    async def get_logs_by_user(
+        self, 
+        user_id: str, 
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 100
+    ) -> List[AttendanceLog]:
+        """Get all attendance logs for a user with optional date filtering."""
+        from datetime import datetime, timezone
+        
+        # Build query
+        query = {
+            "user_id": user_id, 
+            "liveness": {"$exists": True, "$ne": "pending"}
+        }
+        
+        # Add date filtering if provided
+        if start_date or end_date:
+            query["timestamp"] = {}
+            if start_date:
+                # Ensure timezone-aware (copy to avoid modifying parameter)
+                start_dt = start_date
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                query["timestamp"]["$gte"] = start_dt
+            if end_date:
+                # Ensure timezone-aware (copy to avoid modifying parameter)
+                end_dt = end_date
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                # Add 23:59:59 to end_date to include the entire day
+                if end_dt.hour == 0 and end_dt.minute == 0:
+                    end_dt = end_dt.replace(hour=23, minute=59, second=59)
+                query["timestamp"]["$lte"] = end_dt
+        
+        # Query with limit and sort by timestamp descending
+        cursor = self.collection.find(query).sort("timestamp", -1).limit(limit)
+        
         logs = []
         async for doc in cursor:
             doc["_id"] = str(doc["_id"])

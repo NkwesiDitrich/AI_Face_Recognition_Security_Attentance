@@ -126,6 +126,42 @@ async def record_attendance(
 ):
     """✅ LOG: Final attendance record + log liveness result"""
     
+    # CRITICAL: Reject immediately if liveness is not "passed"
+    if request.liveness != "passed":
+        print(f"\n❌ REJECTED: Liveness check failed - NO attendance will be recorded")
+        print(f"   User ID: {request.user_id}")
+        print(f"   Liveness status: {request.liveness}")
+        print(f"   Attempts used: {request.attempts_used}")
+        print(f"   Final failed action: {request.final_failed_action}")
+        
+        # Calculate liveness duration if start time provided (for logging only)
+        liveness_duration_ms = None
+        if request.liveness_start_time:
+            liveness_duration_ms = int((time.time() - request.liveness_start_time) * 1000)
+        
+        # ✅ LOG 3: Liveness result (FINAL) - logged for failed attempts too
+        await attendance_service.log_liveness_result(
+            session_id=request.session_id,
+            user_id=request.user_id,
+            passed=False,
+            attempts_used=request.attempts_used or 1,
+            final_failed_action=request.final_failed_action,
+            duration_ms=liveness_duration_ms
+        )
+        
+        # Return explicit failure response - NO attendance recorded
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "status": "liveness_failed",
+                "message": "Liveness check failed. Attendance NOT recorded.",
+                "liveness": request.liveness,
+                "attempts_used": request.attempts_used or 1,
+                "final_failed_action": request.final_failed_action
+            }
+        )
+    
     # Calculate liveness duration if start time provided
     liveness_duration_ms = None
     if request.liveness_start_time:
@@ -136,15 +172,15 @@ async def record_attendance(
     await attendance_service.log_liveness_result(
         session_id=request.session_id,
         user_id=request.user_id,
-        passed=(request.liveness == "passed"),
+        passed=True,
         attempts_used=request.attempts_used or 1,
         final_failed_action=request.final_failed_action,
         duration_ms=liveness_duration_ms
     )
     
-    # Only record attendance if liveness passed
+    # Only record attendance if liveness passed (double-check)
     if request.liveness == "passed":
-        return await attendance_service.record_attendance(
+        result = await attendance_service.record_attendance(
             user_id=request.user_id, 
             liveness_status=request.liveness, 
             event_type=request.event_type,
@@ -156,11 +192,18 @@ async def record_attendance(
             liveness_start_time=request.liveness_start_time,
             liveness_duration_ms=liveness_duration_ms  # Pass calculated duration
         )
+        # Ensure response explicitly indicates success
+        if isinstance(result, dict):
+            result["status"] = "success"
+            result["liveness"] = "passed"
+        return result
     else:
-        # Liveness failed - don't record attendance, but result is already logged
-        return {
-            "status": "liveness_failed",
-            "message": "Liveness check failed. Attendance not recorded.",
-            "attempts_used": request.attempts_used or 1,
-            "final_failed_action": request.final_failed_action
-        }
+        # This should never happen due to check above, but safety check
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "status": "liveness_failed",
+                "message": "Liveness check failed. Attendance not recorded."
+            }
+        )

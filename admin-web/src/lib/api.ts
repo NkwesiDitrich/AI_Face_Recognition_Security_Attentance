@@ -170,6 +170,49 @@ class ApiClient {
     const response = await this.client.get('/api/v1/admin/dashboard/overview')
     return response.data
   }
+
+  // Notification endpoints
+  async getNotifications(params?: { unread_only?: boolean; limit?: number }) {
+    const response = await this.client.get('/api/v1/admin/notifications', { params })
+    return response.data
+  }
+
+  async getUnreadNotificationCount() {
+    const response = await this.client.get('/api/v1/admin/notifications/unread-count')
+    return response.data.count
+  }
+
+  async markNotificationAsRead(notificationId: string) {
+    const response = await this.client.post(`/api/v1/admin/notifications/${notificationId}/read`)
+    return response.data
+  }
+
+  async markAllNotificationsAsRead() {
+    const response = await this.client.post('/api/v1/admin/notifications/mark-all-read')
+    return response.data
+  }
+
+  // Message endpoints
+  async sendMessage(data: {
+    title: string
+    content: string
+    message_type: 'info' | 'warning' | 'instruction'
+    target_type: 'all_users' | 'group' | 'single_user'
+    target_ids: string[]
+  }) {
+    const response = await this.client.post('/api/v1/admin/messages/send', data)
+    return response.data
+  }
+
+  async getMessages(params?: { limit?: number }) {
+    const response = await this.client.get('/api/v1/admin/messages', { params })
+    return response.data
+  }
+
+  async getMessageDeliveryStatus(messageId: string) {
+    const response = await this.client.get(`/api/v1/admin/messages/${messageId}/delivery-status`)
+    return response.data
+  }
 }
 
 export const api = new ApiClient()

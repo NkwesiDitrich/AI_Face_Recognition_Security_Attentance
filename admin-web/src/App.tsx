@@ -9,6 +9,7 @@ import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import Attendance from '@/pages/Attendance'
 import AttendanceFeed from '@/pages/AttendanceFeed'
+import Messages from '@/pages/Messages'
 
 function App() {
   const { checkAuth, isLoading } = useAuthStore()
@@ -82,6 +83,16 @@ function App() {
           <ProtectedRoute>
             <Layout>
               <AttendanceFeed />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/messages"
+        element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              <Messages />
             </Layout>
           </ProtectedRoute>
         }

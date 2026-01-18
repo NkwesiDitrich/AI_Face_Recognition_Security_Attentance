@@ -20,8 +20,17 @@ from app.dependencies import (
     get_attendance_repository,
     get_system_log_repository,
     get_admin_repository,
+    get_notification_service,
+    get_message_service,
     security
 )
+from app.domains.notification.models import (
+    NotificationPriority,
+    NotificationCategory,
+    MessageType,
+    MessageTarget
+)
+from app.domains.notification.service import NotificationService, MessageService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -814,6 +823,11 @@ async def attendance_feed_websocket(websocket: WebSocket):
             
             # Poll for new attendance events
             try:
+                # Ensure last_timestamp is timezone-aware for comparison
+                from datetime import timezone as tz
+                if last_timestamp.tzinfo is None:
+                    last_timestamp = last_timestamp.replace(tzinfo=tz.utc)
+                
                 # Query for events after last_timestamp
                 query = {
                     "timestamp": {"$gt": last_timestamp},
@@ -828,6 +842,16 @@ async def attendance_feed_websocket(websocket: WebSocket):
                     if "liveness" not in doc or not doc["liveness"]:
                         continue
                     
+                    # Ensure doc timestamp is timezone-aware for comparison
+                    doc_timestamp = doc.get("timestamp")
+                    if isinstance(doc_timestamp, datetime):
+                        if doc_timestamp.tzinfo is None:
+                            doc_timestamp = doc_timestamp.replace(tzinfo=tz.utc)
+                        
+                        # Only process if after last_timestamp
+                        if doc_timestamp <= last_timestamp:
+                            continue
+                    
                     # Get user name
                     user_name = "Unknown"
                     if doc.get("user_id"):
@@ -840,7 +864,7 @@ async def attendance_feed_websocket(websocket: WebSocket):
                         "id": doc["_id"],
                         "user_id": doc.get("user_id"),
                         "user_name": user_name,
-                        "timestamp": doc["timestamp"].isoformat() if isinstance(doc["timestamp"], datetime) else doc["timestamp"],
+                        "timestamp": doc_timestamp.isoformat() if isinstance(doc_timestamp, datetime) else str(doc_timestamp),
                         "status": "success" if doc.get("liveness") == "passed" else "failed",
                         "liveness": doc.get("liveness"),
                         "event_type": doc.get("event_type", "check_in"),
@@ -849,10 +873,10 @@ async def attendance_feed_websocket(websocket: WebSocket):
                     }
                     events.append(event)
                     
-                    # Update last_timestamp
-                    if isinstance(doc["timestamp"], datetime):
-                        if doc["timestamp"] > last_timestamp:
-                            last_timestamp = doc["timestamp"]
+                    # Update last_timestamp (ensure timezone-aware)
+                    if isinstance(doc_timestamp, datetime):
+                        if doc_timestamp > last_timestamp:
+                            last_timestamp = doc_timestamp
                 
                 # Send events to client
                 if events:
@@ -883,3 +907,97 @@ async def attendance_feed_websocket(websocket: WebSocket):
             await websocket.close()
         except:
             pass
+
+# Notification Endpoints
+@router.get("/notifications")
+async def get_notifications(
+    unread_only: bool = False,
+    limit: int = 50,
+    current_admin: AdminOut = Depends(get_current_admin),
+    notification_service: NotificationService = Depends(get_notification_service)
+):
+    """Get notifications for current admin"""
+    notifications = await notification_service.get_notifications(
+        admin_id=current_admin.id,
+        limit=limit,
+        unread_only=unread_only
+    )
+    return [n.model_dump(by_alias=True) for n in notifications]
+
+@router.get("/notifications/unread-count")
+async def get_unread_count(
+    current_admin: AdminOut = Depends(get_current_admin),
+    notification_service: NotificationService = Depends(get_notification_service)
+):
+    """Get unread notification count"""
+    count = await notification_service.get_unread_count(current_admin.id)
+    return {"count": count}
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_as_read(
+    notification_id: str,
+    current_admin: AdminOut = Depends(get_current_admin),
+    notification_service: NotificationService = Depends(get_notification_service)
+):
+    """Mark a notification as read"""
+    success = await notification_service.mark_as_read(notification_id, current_admin.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"message": "Notification marked as read"}
+
+@router.post("/notifications/mark-all-read")
+async def mark_all_notifications_as_read(
+    current_admin: AdminOut = Depends(get_current_admin),
+    notification_service: NotificationService = Depends(get_notification_service)
+):
+    """Mark all notifications as read"""
+    count = await notification_service.mark_all_as_read(current_admin.id)
+    return {"message": f"{count} notifications marked as read", "count": count}
+
+# Message Endpoints
+class SendMessageRequest(BaseModel):
+    title: str
+    content: str
+    message_type: MessageType = MessageType.INFO
+    target_type: MessageTarget
+    target_ids: List[str] = Field(default_factory=list)
+
+@router.post("/messages/send")
+async def send_message(
+    request: SendMessageRequest,
+    current_admin: AdminOut = Depends(require_admin_role),
+    message_service: MessageService = Depends(get_message_service)
+):
+    """Send a message to users"""
+    message = await message_service.send_message(
+        sender_admin_id=current_admin.id,
+        sender_name=current_admin.name,
+        title=request.title,
+        content=request.content,
+        message_type=request.message_type,
+        target_type=request.target_type,
+        target_ids=request.target_ids
+    )
+    return message.model_dump(by_alias=True)
+
+@router.get("/messages")
+async def get_messages(
+    limit: int = 50,
+    current_admin: AdminOut = Depends(get_current_admin),
+    message_service: MessageService = Depends(get_message_service)
+):
+    """Get messages sent by current admin"""
+    messages = await message_service.get_messages_by_sender(current_admin.id, limit)
+    return [m.model_dump(by_alias=True) for m in messages]
+
+@router.get("/messages/{message_id}/delivery-status")
+async def get_message_delivery_status(
+    message_id: str,
+    current_admin: AdminOut = Depends(get_current_admin),
+    message_service: MessageService = Depends(get_message_service)
+):
+    """Get delivery status for a message"""
+    status = await message_service.get_message_delivery_status(message_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return status
