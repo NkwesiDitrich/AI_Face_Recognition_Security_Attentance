@@ -112,3 +112,28 @@ class UserRepository:
         
         count = await self.collection.count_documents(query)
         return count > 0
+    
+    async def check_name_exists(self, name: str, exclude_user_id: Optional[str] = None) -> bool:
+        """Check if name already exists (case-insensitive)"""
+        query = {"name": {"$regex": f"^{name}$", "$options": "i"}}  # Case-insensitive exact match
+        if exclude_user_id and ObjectId.is_valid(exclude_user_id):
+            query["_id"] = {"$ne": ObjectId(exclude_user_id)}
+        
+        count = await self.collection.count_documents(query)
+        return count > 0
+    
+    async def generate_unique_employee_id(self) -> str:
+        """Generate a unique 4-digit employee ID"""
+        import random
+        
+        max_attempts = 100  # Prevent infinite loop
+        for _ in range(max_attempts):
+            # Generate random 4-digit number (1000-9999)
+            employee_id = str(random.randint(1000, 9999))
+            
+            # Check if it already exists
+            if not await self.check_employee_id_exists(employee_id):
+                return employee_id
+        
+        # If we couldn't generate unique ID (very unlikely), raise error
+        raise Exception("Unable to generate unique employee ID after 100 attempts")

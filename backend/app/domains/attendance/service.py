@@ -319,9 +319,14 @@ class AttendanceService:
                 if recognition_duration is not None and liveness_duration is not None:
                     total_duration_ms = recognition_duration + liveness_duration
             
-            # Only create attendance record if liveness passed
+            # CRITICAL: Only create attendance record if liveness passed
+            # This is a safety check - should never be called with failed liveness
             if liveness_status != "passed":
-                print(f"\n⚠️ Liveness failed - not creating attendance record")
+                print(f"\n❌ CRITICAL ERROR: Attempted to create attendance record with failed liveness!")
+                print(f"   User ID: {user_id}")
+                print(f"   Liveness status: {liveness_status}")
+                print(f"   Session ID: {session_id}")
+                print(f"   This should NEVER happen - attendance records should only be created when liveness passes!")
                 return {
                     "status": "liveness_failed",
                     "message": "Liveness check failed. Attendance not recorded.",
@@ -330,6 +335,7 @@ class AttendanceService:
                 }
             
             # ✅ LOG 5: Final attendance record (only if liveness passed)
+            # This log is only created when liveness actually passed
             if self.system_log_repo:
                 try:
                     await self.system_log_repo.add_log(SystemLog(

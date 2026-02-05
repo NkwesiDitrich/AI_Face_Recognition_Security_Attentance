@@ -230,7 +230,7 @@ class UserService:
                     user_id=None,  # Not yet created
                     initiated_by=initiated_by,
                     device_id=device_id,
-                    metadata={"name": user_data.name, "employee_id": user_data.employee_id}
+                    metadata={"name": user_data.name, "employee_id": user_data.employee_id or "auto-generated"}
                 ))
             except Exception as e:
                 print(f"⚠️ Failed to log enrollment started: {e}")
@@ -251,11 +251,35 @@ class UserService:
                         duration_ms=duration_ms,
                         device_id=device_id,
                         initiated_by=initiated_by,
-                        metadata={"name": user_data.name, "employee_id": user_data.employee_id}
+                        metadata={"name": user_data.name, "employee_id": user_data.employee_id or "auto-generated"}
                     ))
                 except Exception as e:
                     print(f"⚠️ Failed to log enrollment failed: {e}")
             return None
+
+        # ✅ NEW: Check if name already exists (case-insensitive)
+        print(f"🔍 Checking if name '{user_data.name}' already exists...")
+        if await self.user_repo.check_name_exists(user_data.name):
+            print(f"❌ Enrollment rejected: Name '{user_data.name}' already exists")
+            # ✅ LOG: Enrollment failed (duplicate name)
+            if self.system_log_repo:
+                try:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    await self.system_log_repo.add_log(SystemLog(
+                        type="face_enrollment",
+                        stage="failed",
+                        reason="duplicate_name",
+                        duration_ms=duration_ms,
+                        device_id=device_id,
+                        initiated_by=initiated_by,
+                        metadata={"name": user_data.name}
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Failed to log enrollment duplicate name: {e}")
+            return {
+                "error": "duplicate_name",
+                "message": f"Name '{user_data.name}' already exists. Please use a different name.",
+            }
 
         print("🔍 Checking for duplicate enrollment...")
         duplicate_user = await self._check_duplicate_enrollment(encoding)
@@ -289,10 +313,30 @@ class UserService:
                 "existing_employee_id": duplicate_user.employee_id,
             }
 
+        # ✅ NEW: Generate unique 4-digit employee ID if not provided
+        employee_id = user_data.employee_id
+        if not employee_id or (isinstance(employee_id, str) and employee_id.strip() == ""):
+            print("🔢 Generating unique 4-digit employee ID...")
+            employee_id = await self.user_repo.generate_unique_employee_id()
+            print(f"✅ Generated employee ID: {employee_id}")
+        else:
+            # Validate that provided employee_id is 4 digits
+            if not (employee_id.isdigit() and len(employee_id) == 4):
+                return {
+                    "error": "invalid_employee_id",
+                    "message": "Employee ID must be exactly 4 digits (e.g., 1507, 5698)",
+                }
+            # Check if provided employee_id already exists
+            if await self.user_repo.check_employee_id_exists(employee_id):
+                return {
+                    "error": "duplicate_employee_id",
+                    "message": f"Employee ID '{employee_id}' already exists. Please use a different ID.",
+                }
+
         # ✅ REMOVED: image_base64 - images should not be stored in database
         new_user = User(
             name=user_data.name,
-            employee_id=user_data.employee_id,
+            employee_id=employee_id,
             access_level=user_data.access_level,
             face_encodings=encoding,
         )

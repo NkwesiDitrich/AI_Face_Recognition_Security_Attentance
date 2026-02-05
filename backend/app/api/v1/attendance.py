@@ -1,6 +1,6 @@
 # backend/app/api/v1/attendance.py
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Header
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Header, status
 from pydantic import BaseModel
 from typing import Optional, List
 from app.domains.attendance.service import AttendanceService
@@ -178,11 +178,12 @@ async def record_attendance(
         duration_ms=liveness_duration_ms
     )
     
-    # Only record attendance if liveness passed (double-check)
+    # CRITICAL: Only record attendance if liveness passed (triple-check)
+    # This should never be false due to check above, but extra safety
     if request.liveness == "passed":
         result = await attendance_service.record_attendance(
             user_id=request.user_id, 
-            liveness_status=request.liveness, 
+            liveness_status=request.liveness,  # Should always be "passed" here
             event_type=request.event_type,
             session_id=request.session_id,
             device_id=request.device_id or "mobile_app",
@@ -199,6 +200,9 @@ async def record_attendance(
         return result
     else:
         # This should never happen due to check above, but safety check
+        print(f"\n❌ CRITICAL ERROR: Reached attendance recording with liveness != 'passed'")
+        print(f"   Liveness value: {request.liveness}")
+        print(f"   This indicates a logic error in the code!")
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

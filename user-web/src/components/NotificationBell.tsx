@@ -1,10 +1,19 @@
 import { useState, useEffect, useRef } from 'react'
-import { Bell } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Bell, MessageSquare } from 'lucide-react'
+import { api } from '@/lib/api'
 
 export default function NotificationBell() {
   const [isOpen, setIsOpen] = useState(false)
-  const [unreadCount, setUnreadCount] = useState(0)
   const dropdownRef = useRef<HTMLDivElement>(null)
+
+  // Fetch messages to compute unread count (same source as Dashboard & Messages page)
+  const { data: messages = [] } = useQuery({
+    queryKey: ['messages'],
+    queryFn: () => api.getMessages({ limit: 50 }),
+  })
+
+  const unreadCount = messages.filter((m: any) => !m.read).length
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -42,9 +51,43 @@ export default function NotificationBell() {
           <div className="p-4 border-b border-gray-200">
             <h3 className="text-lg font-semibold text-gray-900">Notifications</h3>
           </div>
-          <div className="p-8 text-center text-gray-500">
-            <Bell className="w-12 h-12 mx-auto mb-3 text-gray-400" />
-            <p>No notifications</p>
+          <div className="p-4 max-h-80 overflow-y-auto">
+            {messages.length === 0 ? (
+              <div className="py-6 text-center text-gray-500">
+                <Bell className="w-12 h-12 mx-auto mb-3 text-gray-400" />
+                <p>No notifications</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {messages.slice(0, 10).map((message: any) => (
+                  <div
+                    key={message.id}
+                    className={`p-3 rounded-lg border text-sm ${
+                      !message.read
+                        ? 'bg-blue-50 border-blue-200'
+                        : 'bg-white border-gray-200'
+                    }`}
+                  >
+                    <div className="flex items-start space-x-2">
+                      <MessageSquare className="w-4 h-4 text-blue-500 mt-1" />
+                      <div className="flex-1">
+                        <div className="font-medium text-gray-900 line-clamp-1">
+                          {message.title}
+                        </div>
+                        <div className="text-xs text-gray-600 line-clamp-2 mt-1">
+                          {message.content}
+                        </div>
+                        {!message.read && (
+                          <div className="mt-1 text-xs text-primary-600 font-medium">
+                            New
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

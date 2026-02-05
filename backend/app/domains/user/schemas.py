@@ -11,7 +11,7 @@ from bson import ObjectId
 class UserCreate(BaseModel):
     """Schema for creating a new user (enrollment)"""
     name: str = Field(..., min_length=1, description="User's full name")
-    employee_id: str = Field(..., min_length=1, description="Unique employee ID")
+    employee_id: Optional[str] = Field(default=None, description="Unique employee ID (auto-generated if not provided)")
     access_level: str = Field(default="employee", description="Access level (employee, manager, admin)")
 
     class Config:

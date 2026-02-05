@@ -196,13 +196,22 @@ async def dashboard_overview(
 
     activity: List[DashboardActivityItem] = []
 
-    # Attendance events
+    # Attendance events - ONLY show successful attendance (liveness passed)
+    # Failed liveness attempts should NOT create attendance records, but if they exist, mark as failed
     for d in attendance_docs:
         ts = d.get("timestamp")
         uid = str(d.get("user_id")) if d.get("user_id") else None
         event_type = d.get("event_type") or "check_in"
         liveness = d.get("liveness")
-        status = "success" if liveness == "passed" else "failed"
+        # CRITICAL: Only mark as success if liveness is explicitly "passed"
+        # If liveness is None, "failed", or anything else, mark as failed
+        # This ensures failed attempts are correctly displayed
+        if liveness == "passed":
+            status = "success"
+        else:
+            status = "failed"
+            # Log warning if we see a failed attendance record (shouldn't happen)
+            print(f"⚠️ WARNING: Found attendance record with liveness={liveness} - this should not exist!")
         activity.append(
             DashboardActivityItem(
                 id=str(d.get("_id")),
@@ -239,12 +248,20 @@ async def dashboard_overview(
             )
         )
 
-    # Liveness events
+    # Liveness events - Show ALL liveness attempts (both passed and failed)
+    # This ensures failed attempts are visible in the dashboard
     for d in liveness_docs:
         ts = d.get("timestamp")
         uid = str(d.get("user_id")) if d.get("user_id") else None
         stage = d.get("stage") or "unknown"
-        status = "failed" if stage == "failed" else "success" if stage == "passed" else "info"
+        # CRITICAL: Properly map liveness stage to status
+        # "passed" -> success, "failed" -> failed, everything else -> info
+        if stage == "failed":
+            status = "failed"
+        elif stage == "passed":
+            status = "success"
+        else:
+            status = "info"
         activity.append(
             DashboardActivityItem(
                 id=str(d.get("_id")),

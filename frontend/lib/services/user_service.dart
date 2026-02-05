@@ -22,7 +22,7 @@ class UserService {
   /// ------------------------------
   Future<Map<String, dynamic>> enrollUser({
     required String name,
-    required String employeeId,
+    String employeeId = "", // Optional - will be auto-generated if empty
     required String accessLevel,
     required File imageFile,
   }) async {
@@ -37,7 +37,8 @@ class UserService {
       request.headers['Accept'] = 'application/json';
 
       request.fields['name'] = name;
-      request.fields['employee_id'] = employeeId;
+      request.fields['employee_id'] =
+          employeeId; // Empty string = auto-generate
       request.fields['access_level'] = accessLevel;
 
       request.files.add(
@@ -66,17 +67,37 @@ class UserService {
           'data': jsonDecode(responseBody),
         };
       } else if (response.statusCode == 409) {
+        // Handle duplicate name or duplicate face
+        final errorData = jsonDecode(responseBody);
+        final errorType = errorData['detail']?['error'] ?? '';
+        String message = 'Duplicate detected.';
+
+        if (errorType == 'duplicate_name') {
+          message = errorData['detail']?['message'] ??
+              'Name already exists. Please use a different name.';
+        } else if (errorType == 'duplicate_face') {
+          message = 'Face already registered.';
+        }
+
         return {
           'success': false,
-          'message': 'Duplicate: This face is already registered.',
-          'data': jsonDecode(responseBody),
+          'message': message,
+          'data': errorData,
         };
       } else if (response.statusCode == 400) {
+        final errorData = jsonDecode(responseBody);
+        final errorDetail = errorData['detail'];
+        String message =
+            'Face not detected. Please try again with a clearer photo.';
+
+        if (errorDetail is Map && errorDetail['message'] != null) {
+          message = errorDetail['message'];
+        }
+
         return {
           'success': false,
-          'message':
-              'Face not detected. Please try again with a clearer photo.',
-          'data': jsonDecode(responseBody),
+          'message': message,
+          'data': errorData,
         };
       } else {
         return {

@@ -52,10 +52,10 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
 
   /// Text controllers for user input
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _employeeIdController = TextEditingController();
 
   /// State flags
   bool _isEnrolling = false;
+  String? _enrolledUserId;  // Store enrolled user ID to display
 
   @override
   void initState() {
@@ -88,8 +88,97 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
     // Clean up resources
     _controller.dispose();
     _nameController.dispose();
-    _employeeIdController.dispose();
     super.dispose();
+  }
+  
+  /// Show user ID display screen (auto-closes after 6 seconds)
+  Future<void> _showUserIdDisplay(String userId) async {
+    return showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        // Auto-close after 6 seconds
+        Future.delayed(const Duration(seconds: 6), () {
+          if (Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        });
+        
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.check_circle,
+                  color: Colors.green,
+                  size: 64,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  "Enrollment Successful!",
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  "Your User ID is:",
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.grey,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.blue, width: 2),
+                  ),
+                  child: Text(
+                    userId,
+                    style: const TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
+                      letterSpacing: 4,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  "Please save this ID for future reference",
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  "(This will close automatically in 6 seconds)",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                    fontStyle: FontStyle.italic,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   /// =========================================================================
@@ -285,7 +374,7 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       print("📤 Sending enrollment request to backend...");
       final result = await userService.enrollUser(
         name: _nameController.text.trim(),
-        employeeId: _employeeIdController.text.trim(),
+        employeeId: "",  // Empty = auto-generate
         accessLevel: 'employee',
         imageFile: file,
       );
@@ -294,18 +383,33 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
       if (result["success"] == true) {
         // Success: User enrolled successfully
         print("✅ Enrollment successful!");
+        
+        // Extract user ID from response
+        final userData = result["data"];
+        final userId = userData["employee_id"] ?? "N/A";
+        print("📋 Generated User ID: $userId");
+        
+        // Store user ID for display
+        setState(() {
+          _enrolledUserId = userId;
+        });
+
+        // Show user ID in big text (auto-closes after 6 seconds)
+        await _showUserIdDisplay(userId);
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("✅ Enrollment Successful!"),
+          SnackBar(
+            content: Text("✅ Enrollment Successful! Your ID: $userId"),
             backgroundColor: Colors.green,
-            duration: Duration(seconds: 3),
+            duration: const Duration(seconds: 3),
           ),
         );
 
         // Reset form fields for next enrollment
         _nameController.clear();
-        _employeeIdController.clear();
+        setState(() {
+          _enrolledUserId = null;
+        });
       } else {
         // Error: Enrollment failed
         print("❌ Enrollment failed: ${result["message"]}");
@@ -313,8 +417,12 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
         // Extract error message
         String errorMessage = result["message"] ?? "Enrollment failed";
 
-        // ✨ NEW: Handle duplicate error with special message
-        if (errorMessage.contains("already registered") ||
+        // Handle different error types
+        if (errorMessage.contains("already exists") || 
+            errorMessage.contains("duplicate_name")) {
+          errorMessage = "⚠️ Name already exists!\n"
+              "Please use a different name.";
+        } else if (errorMessage.contains("already registered") ||
             errorMessage.contains("duplicate")) {
           errorMessage = "⚠️ This face is already registered!\n"
               "Please use a different face or contact admin.";
@@ -417,30 +525,6 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                       },
                     ),
 
-                    const SizedBox(height: 16),
-
-                    // Employee ID input field
-                    TextFormField(
-                      controller: _employeeIdController,
-                      decoration: InputDecoration(
-                        labelText: "Employee ID",
-                        hintText: "Enter your employee ID",
-                        prefixIcon: const Icon(Icons.badge),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return "Employee ID is required";
-                        }
-                        if (value.length < 2) {
-                          return "Employee ID must be at least 2 characters";
-                        }
-                        return null;
-                      },
-                    ),
-
                     const SizedBox(height: 30),
 
                     // =====================================================
@@ -506,12 +590,13 @@ class _EnrollmentScreenState extends State<EnrollmentScreen> {
                           ),
                           SizedBox(height: 8),
                           Text(
-                            "1. Enter your full name and employee ID\n"
+                            "1. Enter your full name\n"
                             "2. Position your face in the camera\n"
                             "3. Click 'Take Picture & Enroll'\n"
                             "4. Review the image preview\n"
                             "5. Click 'Confirm & Enroll' to proceed\n"
-                            "6. Or click 'Retake' to try again",
+                            "6. Your unique 4-digit User ID will be displayed\n"
+                            "7. Save your User ID for future reference",
                             style: TextStyle(
                               fontSize: 12,
                               color: Colors.grey,

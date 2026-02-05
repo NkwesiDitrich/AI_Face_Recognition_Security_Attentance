@@ -91,15 +91,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _startPhase1() async {
+    // CRITICAL: Reset ALL state for complete restart from recognition phase
     setState(() {
       _currentPhase = AttendancePhase.phase1;
       _statusMessage = "Place your face inside the frame";
       _isRecognized = false;
       _isSendingFrame = false;
       _isProcessing = false;
+      _faceDetected = false;
       _faceFirstDetectedAt = null;
       _attempts = 0;
+      _livenessPassed = false;
+      _livenessFaceDetected = false;
+      _livenessSuccessStreak = 0;
+      _recognizedUserId = null;
+      _recognizedUserName = null;
+      _currentSessionId = null;
+      _currentChallenge = null;
+      _currentChallengeAction = null;
+      _livenessStartTime = null;
     });
+    _livenessTimer?.cancel();
     await _initializeCamera();
     _connectWebSocket();
   }
@@ -380,10 +392,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       String debugInfo = "";
 
       // 4. Liveness Logic - Check if expression matches challenge
+      // Tuned thresholds: secure but practical so real expressions are detected reliably
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
           final smileProb = face.smilingProbability ?? 0.0;
-          // Lower threshold for smile - ML Kit sometimes reports lower values
+          // Require a clear smile, but allow realistic values from ML Kit
+          // Typical neutral: 0.0–0.3, many real smiles are ~0.4–0.8
+          // Use >0.4 so normal smiles are detected, not only extreme ones.
           expressionMatched = smileProb > 0.4;
           debugInfo = "Smile: $smileProb (need >0.4)";
           debugPrint(
@@ -392,11 +407,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         case ChallengeType.blink:
           final leftEye = face.leftEyeOpenProbability ?? 1.0;
           final rightEye = face.rightEyeOpenProbability ?? 1.0;
-          // For blink: both eyes should be closed (probability < threshold means closed)
-          // More forgiving threshold - either eye closed counts as blink attempt
-          // User needs to blink both eyes together
-          expressionMatched = leftEye < 0.7 || rightEye < 0.7;
-          debugInfo = "Blink: L=$leftEye, R=$rightEye (either <0.7)";
+          // Tuned blink detection:
+          // - Open eye: ~0.8–1.0, closed eye: ~0.0–0.3
+          // - Accept as blink if BOTH eyes are noticeably more closed than open
+          //   OR one eye clearly closed. Security is enforced by requiring 3 frames.
+          final bothClosed = leftEye < 0.6 && rightEye < 0.6;
+          final oneClosed = leftEye < 0.4 || rightEye < 0.4;
+          expressionMatched = bothClosed || oneClosed;
+          debugInfo =
+              "Blink: L=$leftEye, R=$rightEye (both<0.6 OR one<0.4)";
           debugPrint(
               "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -404,12 +423,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           final smileProb = face.smilingProbability ?? 1.0;
           final leftEye = face.leftEyeOpenProbability ?? 0.0;
           final rightEye = face.rightEyeOpenProbability ?? 0.0;
-          // Neutral: low smile AND both eyes reasonably open
-          // More forgiving - just need eyes to be mostly open and no strong smile
+          // Neutral: no strong smile AND eyes reasonably open
           final avgEyeOpen = (leftEye + rightEye) / 2.0;
-          expressionMatched = smileProb < 0.3 && avgEyeOpen > 0.5;
+          // Slightly relaxed eye threshold so neutral is easier to hit
+          expressionMatched = smileProb < 0.3 && avgEyeOpen > 0.6;
           debugInfo =
-              "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.5)";
+              "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.6)";
           debugPrint(
               "😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -422,15 +441,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             final diff = (mouthY - noseY).abs();
             final faceHeight = face.boundingBox.height.toDouble();
             final ratio = diff / faceHeight;
-            // More forgiving threshold - reduce from 0.28 to 0.22 for easier detection
-            expressionMatched = ratio > 0.22;
+            // Tuned mouth-open threshold:
+            // Closed mouth ~0.15–0.18, normal open mouth ≈ 0.20–0.24
+            // Use >0.21 so you don't need to open extremely wide.
+            expressionMatched = ratio > 0.21;
             debugInfo =
-                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.22)";
+                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.21)";
             debugPrint(
                 "😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           } else {
             debugPrint(
                 "😮 Mouth: Landmarks missing (nose=${nose != null}, mouth=${mouth != null})");
+            expressionMatched = false; // Fail if landmarks missing
           }
           break;
       }
@@ -438,25 +460,33 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       await File(photo.path).delete();
       _isProcessing = false;
 
-      // ✅ Require expression to be held for 2 consecutive frames (reduced from 3)
-      // This prevents false positives while still being achievable
-      if (expressionMatched) {
+      // ✅ Require expression to be held for 3 consecutive frames for security
+      // CRITICAL: This ensures the user actually performs the action, not just a momentary match
+      // CRITICAL: Check timer hasn't expired before marking as passed
+      if (expressionMatched && _livenessSecondsRemaining > 0) {
         _livenessSuccessStreak++;
-        debugPrint("✅ Expression matched! Streak: $_livenessSuccessStreak/2");
-        if (_livenessSuccessStreak >= 2) {
-          // Expression held consistently - success!
-          if (mounted && !_livenessPassed) {
-            debugPrint("🎉 Liveness PASSED! Expression held for 2 frames.");
+        debugPrint(
+            "✅ Expression matched! Streak: $_livenessSuccessStreak/3 (need 3 for security)");
+        if (_livenessSuccessStreak >= 3) {
+          // Expression held consistently for 3 frames - success!
+          // CRITICAL: Double-check timer hasn't expired and liveness hasn't already failed
+          if (mounted && !_livenessPassed && _livenessSecondsRemaining > 0) {
+            debugPrint(
+                "🎉 Liveness PASSED! Expression held for 3 consecutive frames.");
             _livenessPassed = true;
             _livenessTimer?.cancel();
             _handleLivenessSuccess();
+          } else {
+            debugPrint(
+                "⚠️ Cannot mark as passed - timer expired or already passed/failed");
           }
         }
       } else {
-        // Expression not matched - reset streak
+        // Expression not matched OR timer expired - reset streak immediately
+        // CRITICAL: Any frame without match resets the counter - ensures actual performance
         if (_livenessSuccessStreak > 0) {
           debugPrint(
-              "❌ Expression not matched. Resetting streak from $_livenessSuccessStreak to 0");
+              "❌ Expression NOT matched (or timer expired). Resetting streak from $_livenessSuccessStreak to 0");
           _livenessSuccessStreak = 0;
         }
       }
@@ -467,11 +497,25 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _handleLivenessSuccess() {
+    // CRITICAL: Double-check liveness actually passed before proceeding
+    if (!_livenessPassed || _livenessSecondsRemaining <= 0) {
+      debugPrint("❌ Cannot proceed to success - liveness not actually passed");
+      _showFinalFailure("Liveness check failed. Please try again.");
+      return;
+    }
+
     setState(() {
       _statusMessage = "✔ Step 2 completed\n✔ Liveness detection completed";
     });
     Timer(const Duration(seconds: 1), () {
-      _recordAttendance();
+      // CRITICAL: Check again before recording attendance
+      if (_livenessPassed && _recognizedUserId != null) {
+        _recordAttendance();
+      } else {
+        debugPrint(
+            "❌ Cannot record - liveness not passed or user not recognized");
+        _showFinalFailure("Liveness check failed. Please try again.");
+      }
     });
   }
 
@@ -525,6 +569,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _handleLivenessFailure() {
+    // CRITICAL: Immediately mark liveness as failed to prevent any success callbacks
+    _livenessPassed = false;
+    _livenessTimer?.cancel();
+
     // ✅ Log liveness attempt failure
     if (_currentSessionId != null) {
       _logLivenessAttempt(_attempts, _currentChallengeAction);
@@ -572,10 +620,22 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _recordAttendance() async {
-    // CRITICAL: Only record if liveness actually passed
+    // CRITICAL: Multiple checks to ensure liveness actually passed
     if (!_livenessPassed) {
-      debugPrint("❌ Cannot record attendance - liveness not passed");
+      debugPrint("❌ Cannot record attendance - liveness not passed (check 1)");
       _showFinalFailure("Liveness check failed. Please try again.");
+      return;
+    }
+
+    if (_livenessSecondsRemaining <= 0) {
+      debugPrint("❌ Cannot record attendance - timer expired (check 2)");
+      _showFinalFailure("Liveness check failed. Time expired.");
+      return;
+    }
+
+    if (_recognizedUserId == null || _recognizedUserName == null) {
+      debugPrint("❌ Cannot record attendance - user not recognized (check 3)");
+      _showFinalFailure("User not recognized. Please try again.");
       return;
     }
 
@@ -603,22 +663,39 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         }),
       );
 
-      // CRITICAL: Only show "Access Granted" if response is 200 AND status is success
+      // CRITICAL: Only show "Access Granted" if response is 200 AND status is success AND liveness is explicitly "passed"
+      // Also verify frontend state is still valid
       if (response.statusCode == 200) {
         try {
           final responseData = jsonDecode(response.body);
-          // CRITICAL: Only show access granted if backend explicitly confirms success
-          if (responseData['status'] == 'success' && 
-              (responseData['liveness'] == 'passed' || responseData['liveness'] == null)) {
-            debugPrint("✅ Backend confirmed attendance recorded successfully");
+          debugPrint(
+              "📥 Backend response: status=${responseData['status']}, liveness=${responseData['liveness']}");
+
+          // CRITICAL: Multiple checks before showing access granted
+          final backendStatus = responseData['status'];
+          final backendLiveness = responseData['liveness'];
+
+          // NEVER show access granted unless ALL conditions are met:
+          // 1. Backend status is 'success'
+          // 2. Backend liveness is explicitly 'passed' (not null, not 'failed', not anything else)
+          // 3. Frontend liveness is still marked as passed
+          if (backendStatus == 'success' &&
+              backendLiveness == 'passed' &&
+              _livenessPassed) {
+            debugPrint(
+                "✅ Backend confirmed attendance recorded successfully with liveness passed");
             setState(() {
               _currentPhase = AttendancePhase.finalResult;
               _statusMessage = "Access Granted";
             });
           } else {
-            // Backend rejected - liveness failed or status not success
-            debugPrint("❌ Backend rejected attendance - status: ${responseData['status']}, liveness: ${responseData['liveness']}");
-            _showFinalFailure("Liveness check failed. Attendance not recorded.");
+            // Backend rejected or frontend state invalid - show failure
+            debugPrint("❌ Backend rejected or frontend state invalid");
+            debugPrint(
+                "   Backend status: $backendStatus, liveness: $backendLiveness");
+            debugPrint("   Frontend liveness passed: $_livenessPassed");
+            _showFinalFailure(
+                "Liveness check failed. Attendance not recorded.");
           }
         } catch (e) {
           // If response parsing fails, DO NOT assume success - treat as failure
@@ -630,7 +707,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         debugPrint("❌ HTTP 400: Backend rejected - liveness failed");
         try {
           final errorData = jsonDecode(response.body);
-          debugPrint("   Error detail: ${errorData['detail']}");
+          debugPrint(
+              "   Error detail: ${errorData['detail'] ?? errorData['message']}");
+          debugPrint(
+              "   Status: ${errorData['status']}, Liveness: ${errorData['liveness']}");
         } catch (e) {
           debugPrint("   Could not parse error response");
         }
@@ -648,21 +728,30 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   void _showFinalFailure(String msg) {
-    // CRITICAL: Reset liveness state to prevent showing "Access Granted"
+    // CRITICAL: Reset ALL state to prevent showing "Access Granted" and ensure clean restart
     _livenessPassed = false;
     _livenessFaceDetected = false;
     _livenessSuccessStreak = 0;
     _livenessTimer?.cancel();
-    
+    _isRecognized = false;
+    _recognizedUserId = null;
+    _recognizedUserName = null;
+    _currentSessionId = null;
+    _currentChallenge = null;
+    _currentChallengeAction = null;
+    _livenessStartTime = null;
+    _attempts = 0;
+
     setState(() {
       _currentPhase = AttendancePhase.fail;
       _statusMessage = msg;
     });
-    
-    // Always redirect back to phase 1 (animation screen) after failure
+
+    // Always redirect back to phase 1 (recognition phase) after failure - complete restart
     Timer(const Duration(seconds: 2), () {
       if (mounted) {
-        debugPrint("🔄 Redirecting to phase 1 (animation screen) after failure");
+        debugPrint(
+            "🔄 Redirecting to phase 1 (recognition phase) after liveness failure - complete restart");
         _startPhase1();
       }
     });

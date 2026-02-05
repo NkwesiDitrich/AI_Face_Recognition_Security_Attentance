@@ -21,7 +21,7 @@ router = APIRouter()
 @router.post("/enroll", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def enroll_user_endpoint(
     name: str = Form(...),
-    employee_id: str = Form(...),
+    employee_id: str = Form(None),  # Optional - will be auto-generated if None or empty
     access_level: str = Form("employee"),
     file: UploadFile = File(...),
     user_service: UserService = Depends(get_user_service)
@@ -64,9 +64,12 @@ async def enroll_user_endpoint(
     print(f"📦 Image size: {len(image_bytes)} bytes")
 
     # Create UserCreate schema with form data
+    # Convert empty string to None for optional employee_id
+    employee_id_value = None if (employee_id is None or employee_id.strip() == "") else employee_id
+    
     user_data = UserCreate(
         name=name,
-        employee_id=employee_id,
+        employee_id=employee_id_value,
         access_level=access_level
     )
 
@@ -82,24 +85,42 @@ async def enroll_user_endpoint(
             detail="Face not detected in the image. Please try again with a clear face photo."
         )
 
-    # ✨ NEW: Handle duplicate detection error
-    # If result is a dict with "error" key, it's a duplicate
-    if isinstance(result, dict) and result.get("error") == "duplicate":
-        print(f"❌ Enrollment rejected: Duplicate face detected")
-        print(f"   Existing user: {result.get('existing_user_name')} ({result.get('existing_employee_id')})")
+    # ✨ NEW: Handle duplicate detection errors
+    # If result is a dict with "error" key, it's an error
+    if isinstance(result, dict) and result.get("error"):
+        error_type = result.get("error")
         
-        # Return 409 Conflict status code
-        # This indicates the request conflicts with existing data
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "duplicate_face",
-                "message": f"Face already registered as {result.get('existing_user_name')}",
-                "existing_user_id": result.get("existing_user_id"),
-                "existing_user_name": result.get("existing_user_name"),
-                "existing_employee_id": result.get("existing_employee_id")
-            }
-        )
+        if error_type == "duplicate_name":
+            print(f"❌ Enrollment rejected: Name already exists")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "duplicate_name",
+                    "message": result.get("message", "Name already exists")
+                }
+            )
+        elif error_type == "duplicate":
+            print(f"❌ Enrollment rejected: Duplicate face detected")
+            print(f"   Existing user: {result.get('existing_user_name')} ({result.get('existing_employee_id')})")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "duplicate_face",
+                    "message": f"Face already registered as {result.get('existing_user_name')}",
+                    "existing_user_id": result.get("existing_user_id"),
+                    "existing_user_name": result.get("existing_user_name"),
+                    "existing_employee_id": result.get("existing_employee_id")
+                }
+            )
+        elif error_type in ["invalid_employee_id", "duplicate_employee_id"]:
+            print(f"❌ Enrollment rejected: {result.get('message')}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": error_type,
+                    "message": result.get("message", "Invalid employee ID")
+                }
+            )
 
     # Success: Return the enrolled user
     print(f"✅ Enrollment successful for: {name}")
