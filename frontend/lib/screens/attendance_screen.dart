@@ -131,7 +131,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.100.58:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.85.202:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
@@ -396,11 +396,33 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
           final smileProb = face.smilingProbability ?? 0.0;
-          // Require a clear smile, but allow realistic values from ML Kit
-          // Typical neutral: 0.0–0.3, many real smiles are ~0.4–0.8
-          // Use >0.4 so normal smiles are detected, not only extreme ones.
-          expressionMatched = smileProb > 0.4;
-          debugInfo = "Smile: $smileProb (need >0.4)";
+          // Fallback using mouth geometry (ML Kit smilingProbability is often conservative)
+          double mouthRatio = 0.0;
+          double mouthWidthRatio = 0.0;
+          final nose = face.landmarks[FaceLandmarkType.noseBase];
+          final bottomMouth = face.landmarks[FaceLandmarkType.bottomMouth];
+          final leftMouth = face.landmarks[FaceLandmarkType.leftMouth];
+          final rightMouth = face.landmarks[FaceLandmarkType.rightMouth];
+          if (nose != null && bottomMouth != null) {
+            final mouthY = bottomMouth.position.y.toDouble();
+            final noseY = nose.position.y.toDouble();
+            final diff = (mouthY - noseY).abs();
+            final faceHeight = face.boundingBox.height.toDouble();
+            if (faceHeight > 0) mouthRatio = diff / faceHeight;
+          }
+          if (leftMouth != null && rightMouth != null) {
+            final w = (rightMouth.position.x - leftMouth.position.x).toDouble();
+            final faceW = face.boundingBox.width.toDouble();
+            if (faceW > 0) mouthWidthRatio = w.abs() / faceW;
+          }
+          // Relaxed thresholds: model often under-reports smile (0.1–0.3 even when smiling)
+          // Accept smile if: prob high enough OR (prob + mouth open) OR mouth visibly stretched
+          final probStrongSmile = smileProb > 0.22;
+          final probModerateSmile = smileProb > 0.14 && mouthRatio > 0.17;
+          final mouthStretchSmile = mouthWidthRatio > 0.28; // smile widens mouth
+          expressionMatched = probStrongSmile || probModerateSmile || mouthStretchSmile;
+          debugInfo =
+              "Smile: prob=$smileProb, mouthRatio=$mouthRatio, mouthW=$mouthWidthRatio";
           debugPrint(
               "😊 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -420,15 +442,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
         case ChallengeType.neutral:
-          final smileProb = face.smilingProbability ?? 1.0;
+          final smileProb = face.smilingProbability ?? 0.5;
           final leftEye = face.leftEyeOpenProbability ?? 0.0;
           final rightEye = face.rightEyeOpenProbability ?? 0.0;
-          // Neutral: no strong smile AND eyes reasonably open
           final avgEyeOpen = (leftEye + rightEye) / 2.0;
-          // Slightly relaxed eye threshold so neutral is easier to hit
-          expressionMatched = smileProb < 0.3 && avgEyeOpen > 0.6;
+          // Relaxed: "not clearly smiling" (model often gives 0.3–0.5 for neutral)
+          // and eyes open enough (lower bar so neutral is achievable)
+          final notSmiling = smileProb < 0.5;
+          final eyesOpen = avgEyeOpen > 0.45;
+          expressionMatched = notSmiling && eyesOpen;
           debugInfo =
-              "Neutral: smile=$smileProb (<0.3), eyes=$avgEyeOpen (>0.6)";
+              "Neutral: smile=$smileProb (<0.5), eyes=$avgEyeOpen (>0.45)";
           debugPrint(
               "😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -536,7 +560,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_currentSessionId == null || _recognizedUserId == null) return;
     try {
       await http.post(
-        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/started'),
+        Uri.parse('http://192.168.85.202:8000/api/v1/liveness/started'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'session_id': _currentSessionId,
@@ -554,7 +578,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_currentSessionId == null) return;
     try {
       await http.post(
-        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/attempt'),
+        Uri.parse('http://192.168.85.202:8000/api/v1/liveness/attempt'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'session_id': _currentSessionId,
@@ -596,7 +620,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     // Record liveness failure - backend will log it but not create attendance record
     try {
       await http.post(
-        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
+        Uri.parse('http://192.168.85.202:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,
@@ -646,7 +670,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     try {
       final response = await http.post(
         // Use same backend host as WebSocket to avoid network mismatch errors
-        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
+        Uri.parse('http://192.168.85.202:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,
