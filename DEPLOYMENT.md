@@ -54,6 +54,7 @@ DATABASE_NAME=face_attendance_db
 2. Ensure `backend/` contains:
    - `requirements.txt`
    - `app/main.py` (or correct entry point)
+   - `.python-version` (optional; use `3.11` for TensorFlow/DeepFace compatibility)
 
 ### 2.2 Deploy on Render
 
@@ -75,6 +76,8 @@ DATABASE_NAME=face_attendance_db
 6. Deploy and wait. Your backend URL will look like: `https://your-app.onrender.com`.
 
 **Note:** Free tier services sleep after ~15 minutes of inactivity. First request can take ~30 seconds.
+
+**Important:** Use `backend/requirements.txt` (not venv-generated). The project `requirements.txt` includes `tf-keras` and `opencv-python-headless` for Render compatibility. If you see `ModuleNotFoundError: No module named 'tf_keras'`, ensure `tf-keras` is in requirements and redeploy.
 
 ---
 
