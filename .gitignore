@@ -2,7 +2,9 @@
 .env
 backend/.env
 admin-web/.env
+admin-web/.env.production
 user-web/.env
+user-web/.env.production
 
 # Python virtual environment
 venv/
