@@ -15,6 +15,7 @@ enum AttendancePhase {
   success,
   transition,
   liveness,
+  recording, // Waiting for backend to confirm before Access Granted
   finalResult,
   fail
 }
@@ -64,12 +65,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   LivenessChallenge? _currentChallenge;
   int _attempts = 0;
   final int _maxAttempts = 2;
+  static const int _livenessDurationSeconds = 10;
   Timer? _livenessTimer;
-  int _livenessSecondsRemaining = 5;
+  int _livenessSecondsRemaining = _livenessDurationSeconds;
   bool _livenessPassed = false;
   bool _livenessFaceDetected = false;
   int _livenessSuccessStreak =
       0; // Track consecutive frames with correct expression
+  bool _isWaitingForBackend =
+      false; // Only show Access Granted after backend confirms
   String? _currentSessionId; // Track session ID from recognition
   DateTime? _livenessStartTime; // Track when liveness started
   String? _currentChallengeAction; // Track current challenge action type
@@ -110,6 +114,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _currentChallenge = null;
       _currentChallengeAction = null;
       _livenessStartTime = null;
+      _isWaitingForBackend = false;
     });
     _livenessTimer?.cancel();
     await _initializeCamera();
@@ -270,7 +275,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
 
     _attempts++;
-    _livenessSecondsRemaining = 5;
+    _livenessSecondsRemaining = _livenessDurationSeconds;
     _livenessPassed = false;
     _livenessFaceDetected = false;
     _livenessSuccessStreak = 0;
@@ -283,19 +288,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     final challenges = [
       LivenessChallenge(
           type: ChallengeType.smile,
-          instruction: "Please Smile 😊",
+          instruction: "Smile naturally 😊",
           emoji: "😊"),
       LivenessChallenge(
           type: ChallengeType.blink,
-          instruction: "Blink your eyes 😉",
-          emoji: "😉"),
+          instruction: "Close both eyes, then open",
+          emoji: "😑"),
       LivenessChallenge(
           type: ChallengeType.mouthOpen,
-          instruction: "Open your mouth 😮",
+          instruction: 'Open mouth like "oh" 😮',
           emoji: "😮"),
       LivenessChallenge(
           type: ChallengeType.neutral,
-          instruction: "Stay Neutral 😐",
+          instruction: "Relaxed face, lips closed 😐",
           emoji: "😐"),
     ];
     _currentChallenge = challenges[Random().nextInt(challenges.length)];
@@ -388,98 +393,101 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         });
       }
 
+      // Extract face metrics once for all expressions
+      final smileProb = face.smilingProbability ?? 0.0;
+      final leftEye = face.leftEyeOpenProbability ?? 1.0;
+      final rightEye = face.rightEyeOpenProbability ?? 1.0;
+      double mouthRatio = 0.0;
+      double mouthWidthRatio = 0.0;
+      final nose = face.landmarks[FaceLandmarkType.noseBase];
+      final bottomMouth = face.landmarks[FaceLandmarkType.bottomMouth];
+      final leftMouth = face.landmarks[FaceLandmarkType.leftMouth];
+      final rightMouth = face.landmarks[FaceLandmarkType.rightMouth];
+      if (nose != null && bottomMouth != null) {
+        final mouthY = bottomMouth.position.y.toDouble();
+        final noseY = nose.position.y.toDouble();
+        final faceHeight = face.boundingBox.height.toDouble();
+        if (faceHeight > 0) mouthRatio = (mouthY - noseY).abs() / faceHeight;
+      }
+      if (leftMouth != null && rightMouth != null) {
+        final faceW = face.boundingBox.width.toDouble();
+        if (faceW > 0)
+          mouthWidthRatio =
+              (rightMouth.position.x - leftMouth.position.x).abs() / faceW;
+      }
+
       bool expressionMatched = false;
       String debugInfo = "";
 
-      // 4. Liveness Logic - Check if expression matches challenge
-      // Tuned thresholds: now STRICTER so user must clearly perform the emoji action
+      // Shared thresholds
+      const double eyeClosed = 0.38;
+      const double eyeOpen = 0.58;
+      final bothEyesClosed = leftEye < eyeClosed && rightEye < eyeClosed;
+      final bothEyesOpen = leftEye > eyeOpen && rightEye > eyeOpen;
+      final isWinking = (leftEye < eyeClosed && rightEye > eyeOpen) ||
+          (rightEye < eyeClosed && leftEye > eyeOpen);
+      final lipsClosed = mouthRatio < 0.22;
+      final mouthOpenOh = mouthRatio > 0.23;
+
+      // 4. Liveness Logic per user specs
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
-          final smileProb = face.smilingProbability ?? 0.0;
-          // Fallback using mouth geometry (ML Kit smilingProbability is often conservative)
-          double mouthRatio = 0.0;
-          double mouthWidthRatio = 0.0;
-          final nose = face.landmarks[FaceLandmarkType.noseBase];
-          final bottomMouth = face.landmarks[FaceLandmarkType.bottomMouth];
-          final leftMouth = face.landmarks[FaceLandmarkType.leftMouth];
-          final rightMouth = face.landmarks[FaceLandmarkType.rightMouth];
-          if (nose != null && bottomMouth != null) {
-            final mouthY = bottomMouth.position.y.toDouble();
-            final noseY = nose.position.y.toDouble();
-            final diff = (mouthY - noseY).abs();
-            final faceHeight = face.boundingBox.height.toDouble();
-            if (faceHeight > 0) mouthRatio = diff / faceHeight;
-          }
-          if (leftMouth != null && rightMouth != null) {
-            final w = (rightMouth.position.x - leftMouth.position.x).toDouble();
-            final faceW = face.boundingBox.width.toDouble();
-            if (faceW > 0) mouthWidthRatio = w.abs() / faceW;
-          }
-          // STRICTER thresholds: user must give a clear smile
-          // - Strong smile probability
-          // - Or moderate probability + clear mouth drop
-          // - Or clearly stretched mouth width
-          final probStrongSmile = smileProb > 0.35;
-          final probModerateSmile = smileProb > 0.22 && mouthRatio > 0.20;
-          final mouthStretchSmile =
-              mouthWidthRatio > 0.32; // smile widens mouth
+          // Natural smile: mouth curved up, eyes relaxed/open. Not exaggerated.
+          final naturalSmile = smileProb > 0.18;
+          final mouthCurved = mouthWidthRatio > 0.24;
+          final eyesRelaxed = bothEyesOpen;
           expressionMatched =
-              probStrongSmile || probModerateSmile || mouthStretchSmile;
+              (naturalSmile || mouthCurved) && eyesRelaxed && !mouthOpenOh;
           debugInfo =
-              "Smile: prob=$smileProb, mouthRatio=$mouthRatio, mouthW=$mouthWidthRatio";
-          debugPrint(
-              "😊 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+              "Smile: prob=$smileProb, mouthW=$mouthWidthRatio, mouthR=$mouthRatio";
           break;
         case ChallengeType.blink:
-          final leftEye = face.leftEyeOpenProbability ?? 1.0;
-          final rightEye = face.rightEyeOpenProbability ?? 1.0;
-          // STRICT blink detection:
-          // - Require BOTH eyes to be clearly closed (no more "half-blinks" or small eye movements)
-          final bothClosed = leftEye < 0.35 && rightEye < 0.35;
-          expressionMatched = bothClosed;
-          debugInfo = "Blink: L=$leftEye, R=$rightEye (both<0.35)";
-          debugPrint(
-              "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
-          break;
-        case ChallengeType.neutral:
-          final smileProb = face.smilingProbability ?? 0.5;
-          final leftEye = face.leftEyeOpenProbability ?? 0.0;
-          final rightEye = face.rightEyeOpenProbability ?? 0.0;
-          final avgEyeOpen = (leftEye + rightEye) / 2.0;
-          // STRICTER neutral:
-          // - Almost no smile
-          // - Eyes reasonably open
-          final notSmiling = smileProb < 0.35;
-          final eyesOpen = avgEyeOpen > 0.60;
-          expressionMatched = notSmiling && eyesOpen;
-          debugInfo =
-              "Neutral: smile=$smileProb (<0.35), eyes=$avgEyeOpen (>0.60)";
-          debugPrint(
-              "😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          // Both eyes closed (proper blink). One eye closed = wink = FAIL.
+          expressionMatched = bothEyesClosed && !isWinking;
+          debugInfo = "Blink: L=$leftEye, R=$rightEye (both must be closed)";
           break;
         case ChallengeType.mouthOpen:
-          final nose = face.landmarks[FaceLandmarkType.noseBase];
-          final mouth = face.landmarks[FaceLandmarkType.bottomMouth];
-          if (nose != null && mouth != null) {
-            final mouthY = mouth.position.y.toDouble();
-            final noseY = nose.position.y.toDouble();
-            final diff = (mouthY - noseY).abs();
-            final faceHeight = face.boundingBox.height.toDouble();
-            final ratio = diff / faceHeight;
-            // STRICTER mouth-open threshold:
-            // User must clearly open mouth, not just slightly
-            expressionMatched = ratio > 0.26;
-            debugInfo =
-                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.26)";
-            debugPrint(
-                "😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
+          // Mouth open as "oh" or surprised. Jaw relaxed.
+          if (nose != null && bottomMouth != null) {
+            expressionMatched = mouthOpenOh && smileProb < 0.40;
+            debugInfo = "Mouth: ratio=$mouthRatio (oh/surprised)";
           } else {
-            debugPrint(
-                "😮 Mouth: Landmarks missing (nose=${nose != null}, mouth=${mouth != null})");
-            expressionMatched = false; // Fail if landmarks missing
+            expressionMatched = false;
+            debugInfo = "Mouth: landmarks missing";
           }
           break;
+        case ChallengeType.neutral:
+          // Relaxed face, lips closed, eyes open, no smile or frown.
+          final notSmiling = smileProb < 0.32;
+          expressionMatched =
+              notSmiling && lipsClosed && bothEyesOpen && !mouthOpenOh;
+          debugInfo =
+              "Neutral: smile=$smileProb, mouthR=$mouthRatio, eyes open";
+          break;
       }
+
+      // 5. ANTI-MATCH: Wrong expression = FAIL
+      switch (_currentChallenge!.type) {
+        case ChallengeType.smile:
+          if (mouthOpenOh || bothEyesClosed || isWinking)
+            expressionMatched = false;
+          break;
+        case ChallengeType.blink:
+          if (isWinking)
+            expressionMatched = false; // One eye closed = wink, not blink
+          break;
+        case ChallengeType.mouthOpen:
+          if (smileProb > 0.45 || bothEyesClosed || isWinking)
+            expressionMatched = false;
+          break;
+        case ChallengeType.neutral:
+          if (smileProb > 0.35 || mouthOpenOh || !bothEyesOpen)
+            expressionMatched = false;
+          break;
+      }
+
+      debugPrint(
+          "Liveness ${_currentChallenge!.type}: $debugInfo → ${expressionMatched ? 'MATCH' : 'NO'}");
 
       await File(photo.path).delete();
       _isProcessing = false;
@@ -487,11 +495,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       // ✅ Require expression to be held for MORE consecutive frames for higher security
       // CRITICAL: This ensures the user actually performs the action, not just a momentary match
       // CRITICAL: Check timer hasn't expired before marking as passed
+      final framesNeeded =
+          _currentChallenge!.type == ChallengeType.blink ? 3 : 5;
       if (expressionMatched && _livenessSecondsRemaining > 0) {
         _livenessSuccessStreak++;
         debugPrint(
-            "✅ Expression matched! Streak: $_livenessSuccessStreak/5 (need 5 for strict security)");
-        if (_livenessSuccessStreak >= 5) {
+            "✅ Expression matched! Streak: $_livenessSuccessStreak/$framesNeeded");
+        if (_livenessSuccessStreak >= framesNeeded) {
           // Expression held consistently for 5 frames - success!
           // CRITICAL: Double-check timer hasn't expired and liveness hasn't already failed
           if (mounted && !_livenessPassed && _livenessSecondsRemaining > 0) {
@@ -664,7 +674,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
 
     setState(() {
-      _statusMessage = "Recording attendance...";
+      _currentPhase = AttendancePhase.recording;
+      _statusMessage = "Recording attendance...\nWaiting for server...";
+      _isWaitingForBackend = true;
     });
 
     try {
@@ -709,6 +721,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             debugPrint(
                 "✅ Backend confirmed attendance recorded successfully with liveness passed");
             setState(() {
+              _isWaitingForBackend = false;
               _currentPhase = AttendancePhase.finalResult;
               _statusMessage = "Access Granted";
             });
@@ -718,12 +731,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             debugPrint(
                 "   Backend status: $backendStatus, liveness: $backendLiveness");
             debugPrint("   Frontend liveness passed: $_livenessPassed");
+            _isWaitingForBackend = false;
             _showFinalFailure(
                 "Liveness check failed. Attendance not recorded.");
           }
         } catch (e) {
           // If response parsing fails, DO NOT assume success - treat as failure
           debugPrint("❌ Could not parse response - treating as failure: $e");
+          _isWaitingForBackend = false;
           _showFinalFailure("Failed to record attendance. Please try again.");
         }
       } else if (response.statusCode == 400) {
@@ -738,22 +753,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         } catch (e) {
           debugPrint("   Could not parse error response");
         }
+        _isWaitingForBackend = false;
         _showFinalFailure("Liveness check failed. Attendance NOT recorded.");
       } else {
-        // Other HTTP error - don't show access granted, redirect to phase 1
         debugPrint("❌ HTTP error: ${response.statusCode}");
+        _isWaitingForBackend = false;
         _showFinalFailure("Failed to record attendance");
       }
     } catch (e) {
-      // Network error - don't show access granted, redirect to phase 1
       debugPrint("❌ Network error: $e");
+      _isWaitingForBackend = false;
       _showFinalFailure("Network Error: $e");
     }
   }
 
   void _showFinalFailure(String msg) {
-    // CRITICAL: Reset ALL state to prevent showing "Access Granted" and ensure clean restart
     _livenessPassed = false;
+    _isWaitingForBackend = false;
     _livenessFaceDetected = false;
     _livenessSuccessStreak = 0;
     _livenessTimer?.cancel();
@@ -797,6 +813,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         return _buildTransitionUI();
       case AttendancePhase.liveness:
         return _buildLivenessUI();
+      case AttendancePhase.recording:
+        return _buildRecordingUI();
       case AttendancePhase.finalResult:
         return _buildFinalResultUI();
       default:
@@ -934,6 +952,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                               fontWeight: FontWeight.bold))))),
         ]));
   }
+
+  Widget _buildRecordingUI() => Container(
+      color: Colors.blueGrey.shade900,
+      child: Center(
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        if (_isWaitingForBackend)
+          const CircularProgressIndicator(color: Colors.white)
+        else
+          const SizedBox.shrink(),
+        const SizedBox(height: 24),
+        Text(_statusMessage,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white, fontSize: 18)),
+        const SizedBox(height: 8),
+        const Text("Do not leave this screen",
+            style: TextStyle(color: Colors.white54, fontSize: 14)),
+      ])));
 
   Widget _buildFinalResultUI() => Container(
       color: Colors.green,
