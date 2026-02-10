@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Send, Eye, X, Users, User, Building, Info, AlertTriangle, MessageSquare } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -132,7 +132,7 @@ export default function Messages() {
   }
 
   // Get unique groups from users
-  const groups = Array.from(new Set(users.map((u: any) => u.access_level).filter(Boolean)))
+  const groups: string[] = Array.from(new Set(users.map((u: any) => u.access_level).filter((x): x is string => Boolean(x))))
 
   return (
     <div className="space-y-6">
@@ -335,7 +335,7 @@ export default function Messages() {
                       required
                     >
                       <option value="">Select a group...</option>
-                      {groups.map((group) => (
+                      {groups.map((group: string) => (
                         <option key={group} value={group}>
                           {group}
                         </option>
