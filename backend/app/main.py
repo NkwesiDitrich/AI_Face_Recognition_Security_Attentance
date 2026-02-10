@@ -1,5 +1,10 @@
 # backend/app/main.py
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -59,18 +64,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS Configuration - Allow frontend to connect
+# CORS - Production: set CORS_ORIGINS env (comma-separated). Dev: localhost defaults.
+_default_origins = [
+    "http://localhost:3000", "http://localhost:3001", "http://localhost:5173",
+    "http://127.0.0.1:3000", "http://127.0.0.1:3001", "http://127.0.0.1:5173",
+]
+_cors_origins = os.getenv("CORS_ORIGINS")
+origins = [o.strip() for o in _cors_origins.split(",")] if _cors_origins else _default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # admin-web default port
-        "http://localhost:3001",  # user-web port
-        "http://localhost:5173",  # Vite dev server
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:5173",
-        # Add your mobile app URL if needed
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

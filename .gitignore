@@ -1,3 +1,9 @@
+# Environment (secrets)
+.env
+backend/.env
+admin-web/.env
+user-web/.env
+
 # Python virtual environment
 venv/
 backend/venv/

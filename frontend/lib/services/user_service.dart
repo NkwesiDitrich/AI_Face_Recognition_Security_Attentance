@@ -2,20 +2,11 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
-class UserService {
-  /// ==========================================================================
-  /// 🌐 NETWORK CONFIGURATION FOR REAL DEVICES
-  /// ==========================================================================
-  ///
-  /// 1. EMULATOR: Use 'http://10.0.2.2:8000/api/v1'
-  /// 2. REAL DEVICE: Use your computer's Local IP (e.g., 'http://192.168.1.5:8000/api/v1')
-  ///
-  /// IMPORTANT: Your phone and computer MUST be on the same Wi-Fi network.
-  /// ==========================================================================
+import 'package:ai_face_attendance_frontend/config/api_config.dart';
 
-  // CHANGE THIS to your computer's IP address when testing on a real phone!
-  static const String _serverIp = '192.168.100.58'; // Default for emulator
-  static const String baseUrl = 'http://$_serverIp:8000/api/v1';
+class UserService {
+  /// API base. Set via: flutter run --dart-define=API_BASE_URL=https://your-api.com
+  static String get baseUrl => '${apiBaseUrl}/api/v1';
 
   /// ------------------------------
   /// ENROLL USER

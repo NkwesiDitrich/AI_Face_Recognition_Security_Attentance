@@ -10,16 +10,19 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.domains.admin.models import Admin
 
-MONGO_DETAILS = "mongodb://localhost:27017"
-DATABASE_NAME = "face_attendance_db"
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGO_URL", "mongodb://localhost:27017/face_attendance_db")
+DATABASE_NAME = os.getenv("DATABASE_NAME", "face_attendance_db")
 
 
 async def create_admin():
     """Create the first admin user"""
-    client = AsyncIOMotorClient(MONGO_DETAILS)
+    client = AsyncIOMotorClient(MONGO_URI)
     db = client[DATABASE_NAME]
     collection = db["admins"]
     
