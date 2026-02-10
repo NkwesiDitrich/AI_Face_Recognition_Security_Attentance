@@ -16,12 +16,12 @@ interface AuthState {
 }
 
 // Load from localStorage on init
-const loadAuth = () => {
-  if (typeof window === 'undefined') return { token: null, user: null }
+const loadAuth = (): { token: string | null; user: User | null; isAuthenticated: boolean } => {
+  if (typeof window === 'undefined') return { token: null, user: null, isAuthenticated: false }
   const token = localStorage.getItem('user_token')
   const userStr = localStorage.getItem('user_data')
   const user = userStr ? JSON.parse(userStr) : null
-  return { token, user, isAuthenticated: !!token && !!user }
+  return { token, user, isAuthenticated: !!(token && user) }
 }
 
 const initialAuth = loadAuth()

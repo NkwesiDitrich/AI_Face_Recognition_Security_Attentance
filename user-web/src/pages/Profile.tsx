@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { User, Lock, CheckCircle, XCircle, Save } from 'lucide-react'
 
@@ -12,8 +12,6 @@ export default function Profile() {
   })
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-
-  const queryClient = useQueryClient()
 
   const { data: profile, isLoading } = useQuery({
     queryKey: ['profile'],

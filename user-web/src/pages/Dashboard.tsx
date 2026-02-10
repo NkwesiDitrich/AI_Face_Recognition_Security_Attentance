@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { Calendar, Clock, CheckCircle, XCircle, ArrowRight, MessageSquare, User } from 'lucide-react'
+import { Calendar, CheckCircle, XCircle, ArrowRight, MessageSquare } from 'lucide-react'
 import { format, isToday, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns'
 
 export default function Dashboard() {
@@ -50,10 +50,6 @@ export default function Dashboard() {
 
   // Today's status
   const todayStatus = todayAttendance.length > 0 ? 'present' : 'absent'
-  const todayRecord = attendance.find((r: any) => {
-    const recordDate = new Date(r.date)
-    return isToday(recordDate)
-  })
 
   return (
     <div className="space-y-6">

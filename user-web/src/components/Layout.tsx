@@ -1,6 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
-import { LayoutDashboard, Calendar, MessageSquare, User, LogOut, Bell } from 'lucide-react'
+import { LayoutDashboard, Calendar, MessageSquare, User, LogOut } from 'lucide-react'
 import NotificationBell from './NotificationBell'
 
 export default function Layout({ children }: { children: React.ReactNode }) {
