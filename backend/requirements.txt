@@ -2,7 +2,6 @@
 fastapi
 uvicorn[standard]
 motor
-pydantic
 numpy
 python-multipart
 python-dotenv
@@ -15,3 +14,4 @@ passlib[bcrypt]
 opencv-python-headless
 tf-keras
 deepface
+pydantic[email]
