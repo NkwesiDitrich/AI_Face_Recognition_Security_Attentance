@@ -131,7 +131,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _connectWebSocket() {
     _channel = WebSocketChannel.connect(
-        Uri.parse('ws://192.168.85.202:8000/api/v1/ws/attendance'));
+        Uri.parse('ws://192.168.100.58:8000/api/v1/ws/attendance'));
     _channel!.stream
         .listen((data) => _processBackendResponse(jsonDecode(data)));
   }
@@ -392,7 +392,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       String debugInfo = "";
 
       // 4. Liveness Logic - Check if expression matches challenge
-      // Tuned thresholds: secure but practical so real expressions are detected reliably
+      // Tuned thresholds: now STRICTER so user must clearly perform the emoji action
       switch (_currentChallenge!.type) {
         case ChallengeType.smile:
           final smileProb = face.smilingProbability ?? 0.0;
@@ -415,12 +415,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             final faceW = face.boundingBox.width.toDouble();
             if (faceW > 0) mouthWidthRatio = w.abs() / faceW;
           }
-          // Relaxed thresholds: model often under-reports smile (0.1–0.3 even when smiling)
-          // Accept smile if: prob high enough OR (prob + mouth open) OR mouth visibly stretched
-          final probStrongSmile = smileProb > 0.22;
-          final probModerateSmile = smileProb > 0.14 && mouthRatio > 0.17;
-          final mouthStretchSmile = mouthWidthRatio > 0.28; // smile widens mouth
-          expressionMatched = probStrongSmile || probModerateSmile || mouthStretchSmile;
+          // STRICTER thresholds: user must give a clear smile
+          // - Strong smile probability
+          // - Or moderate probability + clear mouth drop
+          // - Or clearly stretched mouth width
+          final probStrongSmile = smileProb > 0.35;
+          final probModerateSmile = smileProb > 0.22 && mouthRatio > 0.20;
+          final mouthStretchSmile =
+              mouthWidthRatio > 0.32; // smile widens mouth
+          expressionMatched =
+              probStrongSmile || probModerateSmile || mouthStretchSmile;
           debugInfo =
               "Smile: prob=$smileProb, mouthRatio=$mouthRatio, mouthW=$mouthWidthRatio";
           debugPrint(
@@ -429,15 +433,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         case ChallengeType.blink:
           final leftEye = face.leftEyeOpenProbability ?? 1.0;
           final rightEye = face.rightEyeOpenProbability ?? 1.0;
-          // Tuned blink detection:
-          // - Open eye: ~0.8–1.0, closed eye: ~0.0–0.3
-          // - Accept as blink if BOTH eyes are noticeably more closed than open
-          //   OR one eye clearly closed. Security is enforced by requiring 3 frames.
-          final bothClosed = leftEye < 0.6 && rightEye < 0.6;
-          final oneClosed = leftEye < 0.4 || rightEye < 0.4;
-          expressionMatched = bothClosed || oneClosed;
-          debugInfo =
-              "Blink: L=$leftEye, R=$rightEye (both<0.6 OR one<0.4)";
+          // STRICT blink detection:
+          // - Require BOTH eyes to be clearly closed (no more "half-blinks" or small eye movements)
+          final bothClosed = leftEye < 0.35 && rightEye < 0.35;
+          expressionMatched = bothClosed;
+          debugInfo = "Blink: L=$leftEye, R=$rightEye (both<0.35)";
           debugPrint(
               "😉 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -446,13 +446,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           final leftEye = face.leftEyeOpenProbability ?? 0.0;
           final rightEye = face.rightEyeOpenProbability ?? 0.0;
           final avgEyeOpen = (leftEye + rightEye) / 2.0;
-          // Relaxed: "not clearly smiling" (model often gives 0.3–0.5 for neutral)
-          // and eyes open enough (lower bar so neutral is achievable)
-          final notSmiling = smileProb < 0.5;
-          final eyesOpen = avgEyeOpen > 0.45;
+          // STRICTER neutral:
+          // - Almost no smile
+          // - Eyes reasonably open
+          final notSmiling = smileProb < 0.35;
+          final eyesOpen = avgEyeOpen > 0.60;
           expressionMatched = notSmiling && eyesOpen;
           debugInfo =
-              "Neutral: smile=$smileProb (<0.5), eyes=$avgEyeOpen (>0.45)";
+              "Neutral: smile=$smileProb (<0.35), eyes=$avgEyeOpen (>0.60)";
           debugPrint(
               "😐 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           break;
@@ -465,12 +466,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             final diff = (mouthY - noseY).abs();
             final faceHeight = face.boundingBox.height.toDouble();
             final ratio = diff / faceHeight;
-            // Tuned mouth-open threshold:
-            // Closed mouth ~0.15–0.18, normal open mouth ≈ 0.20–0.24
-            // Use >0.21 so you don't need to open extremely wide.
-            expressionMatched = ratio > 0.21;
+            // STRICTER mouth-open threshold:
+            // User must clearly open mouth, not just slightly
+            expressionMatched = ratio > 0.26;
             debugInfo =
-                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.21)";
+                "Mouth: diff=$diff, height=$faceHeight, ratio=$ratio (need >0.26)";
             debugPrint(
                 "😮 ${debugInfo} → ${expressionMatched ? 'MATCH' : 'NO MATCH'}");
           } else {
@@ -484,15 +484,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       await File(photo.path).delete();
       _isProcessing = false;
 
-      // ✅ Require expression to be held for 3 consecutive frames for security
+      // ✅ Require expression to be held for MORE consecutive frames for higher security
       // CRITICAL: This ensures the user actually performs the action, not just a momentary match
       // CRITICAL: Check timer hasn't expired before marking as passed
       if (expressionMatched && _livenessSecondsRemaining > 0) {
         _livenessSuccessStreak++;
         debugPrint(
-            "✅ Expression matched! Streak: $_livenessSuccessStreak/3 (need 3 for security)");
-        if (_livenessSuccessStreak >= 3) {
-          // Expression held consistently for 3 frames - success!
+            "✅ Expression matched! Streak: $_livenessSuccessStreak/5 (need 5 for strict security)");
+        if (_livenessSuccessStreak >= 5) {
+          // Expression held consistently for 5 frames - success!
           // CRITICAL: Double-check timer hasn't expired and liveness hasn't already failed
           if (mounted && !_livenessPassed && _livenessSecondsRemaining > 0) {
             debugPrint(
@@ -560,7 +560,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_currentSessionId == null || _recognizedUserId == null) return;
     try {
       await http.post(
-        Uri.parse('http://192.168.85.202:8000/api/v1/liveness/started'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/started'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'session_id': _currentSessionId,
@@ -578,7 +578,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (_currentSessionId == null) return;
     try {
       await http.post(
-        Uri.parse('http://192.168.85.202:8000/api/v1/liveness/attempt'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/liveness/attempt'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'session_id': _currentSessionId,
@@ -620,7 +620,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     // Record liveness failure - backend will log it but not create attendance record
     try {
       await http.post(
-        Uri.parse('http://192.168.85.202:8000/api/v1/record'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,
@@ -670,7 +670,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     try {
       final response = await http.post(
         // Use same backend host as WebSocket to avoid network mismatch errors
-        Uri.parse('http://192.168.85.202:8000/api/v1/record'),
+        Uri.parse('http://192.168.100.58:8000/api/v1/record'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'user_id': _recognizedUserId,

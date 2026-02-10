@@ -1,0 +1,59 @@
+Educational Non-Commercial License
+==================================
+
+Copyright (c) 2026
+
+All rights reserved.
+
+1. Grant of Use
+----------------
+You are granted a non-exclusive, non-transferable, revocable license to:
+
+- View, study, and modify this code for your own personal, academic, or research purposes.
+- Use this project as part of coursework, theses, academic demonstrations, or portfolio work,
+  provided that such use is not commercial in nature.
+
+2. Non-Commercial Restriction
+------------------------------
+You may NOT, under any circumstances:
+
+- Sell, license, sublicense, rent, lease, or otherwise monetize this software or any derivative work.
+- Use this software, in whole or in part, as part of a commercial product or service.
+- Deploy this software in any business, enterprise, or governmental environment for operational use,
+  unless such use is explicitly required by law or by a formal academic / judicial mandate.
+
+3. No Warranty
+---------------
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+4. No Liability for Misuse
+---------------------------
+You are solely responsible for ensuring that your use of this software complies with all applicable
+laws, regulations, institutional policies, and ethical guidelines, especially in relation to:
+
+- Biometric data
+- Face recognition
+- Personal data protection and privacy
+
+The authors and copyright holders accept no responsibility for misuse, unlawful deployment, or any
+consequences arising from the use of this software in violation of this license or applicable law.
+
+5. Redistribution
+------------------
+You may redistribute this code (for example on Git hosting platforms or as part of academic material)
+ONLY if:
+
+- This LICENSE file is included, unmodified.
+- The repository/documentation clearly states that the project is for **educational and non-commercial
+  use only**.
+
+6. Commercial Use
+------------------
+Any desired commercial use (including but not limited to SaaS products, enterprise integrations, or
+paid consulting deployments) is strictly prohibited without prior **written permission** from the
+copyright holder.
+
